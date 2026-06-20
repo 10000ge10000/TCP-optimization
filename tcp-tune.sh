@@ -13,17 +13,89 @@ SESSION_TTL="${TCP_TUNE_SESSION_TTL:-1800}"
 DRY_RUN="${TCP_TUNE_DRY_RUN:-0}"
 LISTEN_PUBLIC_URL="${TCP_TUNE_PUBLIC_URL:-}"
 
+COLOR_RESET=""
+COLOR_BOLD=""
+COLOR_DIM=""
+COLOR_RED=""
+COLOR_GREEN=""
+COLOR_YELLOW=""
+COLOR_BLUE=""
+COLOR_CYAN=""
+PROMPT_REPLY=""
+
+setup_colors() {
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+    COLOR_RESET="$(printf '\033[0m')"
+    COLOR_BOLD="$(printf '\033[1m')"
+    COLOR_DIM="$(printf '\033[2m')"
+    COLOR_RED="$(printf '\033[31m')"
+    COLOR_GREEN="$(printf '\033[32m')"
+    COLOR_YELLOW="$(printf '\033[33m')"
+    COLOR_BLUE="$(printf '\033[34m')"
+    COLOR_CYAN="$(printf '\033[36m')"
+  fi
+}
+
+setup_colors
+
+clear_screen() {
+  if [ -t 1 ]; then
+    printf '\033[2J\033[H'
+  fi
+}
+
+has_interactive_input() {
+  [ -r /dev/tty ] || [ -t 0 ]
+}
+
+prompt_read() {
+  prompt="$1"
+  printf "%s" "$prompt"
+  if [ -r /dev/tty ]; then
+    IFS= read -r PROMPT_REPLY < /dev/tty || return 1
+  else
+    IFS= read -r PROMPT_REPLY || return 1
+  fi
+  return 0
+}
+
+pause_for_enter() {
+  has_interactive_input || return 0
+  printf "\n%s按回车返回菜单...%s" "$COLOR_DIM" "$COLOR_RESET"
+  if [ -r /dev/tty ]; then
+    IFS= read -r PROMPT_REPLY < /dev/tty || true
+  else
+    IFS= read -r PROMPT_REPLY || true
+  fi
+}
+
+print_rule() {
+  printf "%s%s%s\n" "$COLOR_DIM" "------------------------------------------------------------" "$COLOR_RESET"
+}
+
+print_header() {
+  title="$1"
+  printf "%s%s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$title" "$COLOR_RESET"
+  print_rule
+}
+
+print_kv() {
+  label="$1"
+  value="$2"
+  printf "  %s%-14s%s %s\n" "$COLOR_BLUE" "$label" "$COLOR_RESET" "$value"
+}
+
 die() {
-  echo "错误：$*" >&2
+  printf "%s错误：%s%s\n" "$COLOR_RED" "$*" "$COLOR_RESET" >&2
   exit 1
 }
 
 info() {
-  echo "[INFO] $*"
+  printf "%s[INFO]%s %s\n" "$COLOR_GREEN" "$COLOR_RESET" "$*"
 }
 
 warn() {
-  echo "[WARN] $*" >&2
+  printf "%s[WARN]%s %s\n" "$COLOR_YELLOW" "$COLOR_RESET" "$*" >&2
 }
 
 have_cmd() {
@@ -131,9 +203,12 @@ ensure_dependency() {
     install_pkg "$pkg" || die "无法自动安装 $pkg，请手动安装后重试。"
     return 0
   fi
-  if [ -t 0 ]; then
-    printf "缺少 %s，是否立即通过 %s 安装 %s？[y/N] " "$cmd" "$PKG_MANAGER" "$pkg"
-    read install_answer
+  if has_interactive_input; then
+    if ! prompt_read "缺少 $cmd，是否立即通过 $PKG_MANAGER 安装 $pkg？[y/N] "; then
+      install_answer=""
+    else
+      install_answer="$PROMPT_REPLY"
+    fi
     case "$install_answer" in
       y|Y)
         install_pkg "$pkg" || die "无法自动安装 $pkg，请手动安装后重试。"
@@ -1226,18 +1301,9 @@ listen_mode() {
   fi
   echo "$token" > "$STATE_DIR/agent-$AGENT_PORT.token"
   echo "$peer_url" > "$STATE_DIR/agent-$AGENT_PORT.url"
-  echo
-  echo "公网侧临时 Agent 已启动。"
-  echo "仓库：$REPO_URL"
-  echo "Agent 端口：$AGENT_PORT"
-  echo "iperf3 端口：$IPERF_PORT"
-  echo "会话有效期：$SESSION_TTL 秒"
-  echo "连接地址：$peer_url"
-  echo "停止命令：sh tcp-tune.sh stop-agent"
-  echo
-  print_client_commands "$peer_url" "$token"
-  echo
-  echo "注意：请只把 token 发给可信对端。调优结束后执行 stop-agent 停止临时服务。"
+  if [ "${SERVER_MENU_AFTER_LISTEN:-0}" != "1" ]; then
+    render_server_dashboard "$peer_url" "$token"
+  fi
 }
 
 stop_agent() {
@@ -1273,16 +1339,49 @@ get_agent_json() {
   curl -fsS -H "X-TCP-Tune-Token: $token" "$url"
 }
 
+render_server_dashboard() {
+  peer_url="$1"
+  token="$2"
+  clear_screen
+  print_header "$APP_NAME $APP_VERSION - 服务端会话"
+  print_kv "仓库" "$REPO_URL"
+  print_kv "Agent 端口" "$AGENT_PORT"
+  print_kv "iperf3 端口" "$IPERF_PORT"
+  print_kv "会话 TTL" "${SESSION_TTL}s"
+  print_kv "连接地址" "$peer_url"
+  print_kv "状态目录" "$STATE_DIR"
+  echo
+  print_client_commands "$peer_url" "$token"
+  echo
+  printf "%s安全提示：%s token 只发给可信对端；调优结束后选择菜单 5 或执行 sh tcp-tune.sh stop-agent。\n" "$COLOR_YELLOW" "$COLOR_RESET"
+}
+
+render_client_dashboard() {
+  peer_url="$1"
+  host="$2"
+  iperf_port="$3"
+  clear_screen
+  print_header "$APP_NAME $APP_VERSION - 客户端会话"
+  print_kv "服务端" "$peer_url"
+  print_kv "iperf3 主机" "$host"
+  print_kv "iperf3 端口" "$iperf_port"
+  print_kv "本机系统" "${OS_NAME:-Unknown}"
+  echo
+  printf "%s当前会话已连接。%s 可直接选择测速、优化或查看服务端状态。\n" "$COLOR_GREEN" "$COLOR_RESET"
+}
+
 print_client_commands() {
   peer_url="$1"
   token="$2"
-  echo "OpenWrt / Linux / macOS 一键运行："
+  printf "%s客户端连接命令%s\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET"
+  print_rule
+  printf "%sOpenWrt / Linux / macOS 一键运行：%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   echo "  curl -fsSL $RAW_BASE_URL/tcp-tune.sh | sh -s -- --yes client --peer $peer_url --token $token --iperf-port $IPERF_PORT"
   echo
-  echo "已有脚本本地运行："
+  printf "%s已有脚本本地运行：%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   echo "  sh tcp-tune.sh --yes client --peer $peer_url --token $token --iperf-port $IPERF_PORT"
   echo
-  echo "Windows PowerShell："
+  printf "%sWindows PowerShell：%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   echo "  iwr -UseBasicParsing $RAW_BASE_URL/tcp-tune.ps1 -OutFile tcp-tune.ps1"
   printf '  .\\tcp-tune.ps1 client -Peer %s -Token %s -IperfPort %s -Direction download -Yes\n' "$peer_url" "$token" "$IPERF_PORT"
 }
@@ -1358,43 +1457,66 @@ server_menu() {
   token="$(cat "$token_file" 2>/dev/null || true)"
   peer_url="$(cat "$url_file" 2>/dev/null || true)"
   while true; do
+    render_server_dashboard "$peer_url" "$token"
     echo
-    echo "服务端菜单"
-    echo "1. 查看服务端状态"
-    echo "2. 查看客户端上报/事件"
-    echo "3. 运行服务端本机优化"
-    echo "4. 重新显示客户端运行命令"
-    echo "5. 停止会话并退出"
-    echo "0. 退出菜单但保留服务"
-    printf "请选择："
-    read ans || ans=5
+    printf "%s服务端菜单%s\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET"
+    print_rule
+    printf "  %s1%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s2%s 查看客户端上报/事件\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s3%s 运行服务端本机优化\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s4%s 重新显示客户端运行命令\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s5%s 停止会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
+    printf "  %s0%s 退出菜单但保留服务\n" "$COLOR_DIM" "$COLOR_RESET"
+    echo
+    if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
+      warn "当前环境没有可用交互输入，服务端继续保留运行。"
+      return 0
+    fi
+    ans="$PROMPT_REPLY"
     case "$ans" in
-      1) status_full ;;
+      1)
+        clear_screen
+        print_header "服务端状态"
+        status_full
+        pause_for_enter
+        ;;
       2)
+        clear_screen
+        print_header "客户端上报/事件"
         if [ -n "$token" ]; then
           get_agent_json "http://127.0.0.1:$AGENT_PORT/events" "$token" || warn "读取事件失败。"
         else
           warn "未找到 token 文件。"
         fi
+        pause_for_enter
         ;;
       3)
-        printf "请输入测试对端 host/IP："; read host
-        printf "方向：1 download / 2 upload："; read direction_ans
+        clear_screen
+        print_header "服务端本机优化"
+        if ! prompt_read "请输入测试对端 host/IP："; then pause_for_enter; continue; fi
+        host="$PROMPT_REPLY"
+        if ! prompt_read "方向：1 download / 2 upload："; then pause_for_enter; continue; fi
+        direction_ans="$PROMPT_REPLY"
         case "$direction_ans" in 2) direction="upload"; reverse="0" ;; *) direction="download"; reverse="1" ;; esac
-        printf "目标：1 重传 / 2 吞吐 / 3 启动："; read obj
+        if ! prompt_read "目标：1 重传 / 2 吞吐 / 3 启动："; then pause_for_enter; continue; fi
+        obj="$PROMPT_REPLY"
         case "$obj" in 2) objective="throughput" ;; 3) objective="startup" ;; *) objective="retrans" ;; esac
         auto_tune "$host" "$IPERF_PORT" "$objective" 0 3 "$reverse" 0 0 100 "" 0.79 0 1
+        pause_for_enter
         ;;
       4)
+        clear_screen
+        print_header "客户端连接命令"
         if [ -n "$peer_url" ] && [ -n "$token" ]; then
           print_client_commands "$peer_url" "$token"
         else
           warn "未找到会话连接信息。"
         fi
+        pause_for_enter
         ;;
       5) stop_agent; exit 0 ;;
       0) return 0 ;;
-      *) echo "无效选择。" ;;
+      *) warn "无效选择。"; pause_for_enter ;;
     esac
   done
 }
@@ -1406,43 +1528,90 @@ client_menu() {
   iperf_port="$4"
   allow_same_public="$5"
   while true; do
+    render_client_dashboard "$peer" "$host" "$iperf_port"
     echo
-    echo "客户端菜单"
-    echo "1. 查看本机状态"
-    echo "2. 下载方向优化（服务端 -> 本机）"
-    echo "3. 上传方向优化（本机 -> 服务端）"
-    echo "4. 查看服务端状态"
-    echo "5. 查看服务端事件"
-    echo "6. 请求服务端优化"
-    echo "7. 通知服务端停止会话并退出"
-    echo "0. 退出客户端"
-    printf "请选择："
-    read ans || ans=0
+    printf "%s客户端菜单%s\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET"
+    print_rule
+    printf "  %s1%s 查看本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s2%s 下载方向优化（服务端 -> 本机）\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s3%s 上传方向优化（本机 -> 服务端）\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s4%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s5%s 查看服务端事件\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s6%s 请求服务端优化\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s7%s 通知服务端停止会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
+    printf "  %s0%s 退出客户端\n" "$COLOR_DIM" "$COLOR_RESET"
+    echo
+    if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
+      warn "当前环境没有可用交互输入，客户端已保持连接上报后退出菜单。"
+      return 0
+    fi
+    ans="$PROMPT_REPLY"
     case "$ans" in
-      1) status_full ;;
-      2) auto_tune "$host" "$iperf_port" retrans 0 3 1 0 0 100 "" 0.79 0 "$allow_same_public" ;;
-      3) auto_tune "$host" "$iperf_port" retrans 0 3 0 0 0 100 "" 0.79 0 "$allow_same_public" ;;
-      4) get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。" ;;
-      5) get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。" ;;
+      1)
+        clear_screen
+        print_header "本机状态"
+        status_full
+        pause_for_enter
+        ;;
+      2)
+        clear_screen
+        print_header "下载方向优化"
+        auto_tune "$host" "$iperf_port" retrans 0 3 1 0 0 100 "" 0.79 0 "$allow_same_public"
+        pause_for_enter
+        ;;
+      3)
+        clear_screen
+        print_header "上传方向优化"
+        auto_tune "$host" "$iperf_port" retrans 0 3 0 0 0 100 "" 0.79 0 "$allow_same_public"
+        pause_for_enter
+        ;;
+      4)
+        clear_screen
+        print_header "服务端状态"
+        get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"
+        pause_for_enter
+        ;;
+      5)
+        clear_screen
+        print_header "服务端事件"
+        get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。"
+        pause_for_enter
+        ;;
       6)
-        printf "请输入服务端可连接的本机 host/IP："; read target_host
-        printf "方向：1 download / 2 upload："; read direction_ans
+        clear_screen
+        print_header "请求服务端优化"
+        if ! prompt_read "请输入服务端可连接的本机 host/IP："; then pause_for_enter; continue; fi
+        target_host="$PROMPT_REPLY"
+        if ! prompt_read "方向：1 download / 2 upload："; then pause_for_enter; continue; fi
+        direction_ans="$PROMPT_REPLY"
         case "$direction_ans" in 2) direction="upload" ;; *) direction="download" ;; esac
         data="{\"host\":\"$target_host\",\"port\":$iperf_port,\"direction\":\"$direction\",\"objective\":\"retrans\",\"target_retr\":0,\"rounds\":3,\"allow_same_public_ip\":true}"
         post_json "$peer/optimize" "$token" "$data" || warn "请求服务端优化失败。"
+        pause_for_enter
         ;;
       7) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
       0) exit 0 ;;
-      *) echo "无效选择。" ;;
+      *) warn "无效选择。"; pause_for_enter ;;
     esac
   done
 }
 
 server_mode() {
   trap 'stop_agent; exit 130' INT TERM
+  SERVER_MENU_AFTER_LISTEN=1
+  export SERVER_MENU_AFTER_LISTEN
   listen_mode
-  if [ -t 0 ]; then
+  unset SERVER_MENU_AFTER_LISTEN
+  [ "${DRY_RUN:-0}" = "1" ] && return 0
+  if has_interactive_input; then
     server_menu
+  else
+    token_file="$STATE_DIR/agent-$AGENT_PORT.token"
+    url_file="$STATE_DIR/agent-$AGENT_PORT.url"
+    token="$(cat "$token_file" 2>/dev/null || true)"
+    peer_url="$(cat "$url_file" 2>/dev/null || true)"
+    render_server_dashboard "$peer_url" "$token"
+    warn "当前环境没有可用交互输入，服务端已在后台保留运行。"
   fi
 }
 
@@ -1455,32 +1624,36 @@ client_mode() {
 
 menu() {
   while true; do
+    clear_screen
+    print_header "$APP_NAME $APP_VERSION"
+    printf "  %s1%s 启动调优会话\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s2%s 加入调优会话\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s3%s 自动优化\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s4%s 查看双方/本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s5%s 智能推荐参数\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s6%s 选择固定预设\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s7%s 回滚最近修改\n" "$COLOR_YELLOW" "$COLOR_RESET"
+    printf "  %s0%s 退出\n" "$COLOR_DIM" "$COLOR_RESET"
     echo
-    echo "$APP_NAME $APP_VERSION"
-    echo "1. 启动调优会话"
-    echo "2. 加入调优会话"
-    echo "3. 自动优化"
-    echo "4. 查看双方/本机状态"
-    echo "5. 智能推荐参数"
-    echo "6. 选择固定预设"
-    echo "7. 回滚最近修改"
-    echo "0. 退出"
-    printf "请选择："
-    read ans
+    if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
+      warn "当前环境没有可用交互输入。"
+      exit 1
+    fi
+    ans="$PROMPT_REPLY"
     case "$ans" in
       1) listen_mode ;;
       2)
-        printf "请输入对端 Agent 地址：http://"
-        read peer_host
-        printf "请输入 token："
-        read token
+        if ! prompt_read "请输入对端 Agent 地址：http://"; then pause_for_enter; continue; fi
+        peer_host="$PROMPT_REPLY"
+        if ! prompt_read "请输入 token："; then pause_for_enter; continue; fi
+        token="$PROMPT_REPLY"
         join_mode --peer "http://$peer_host" --token "$token" --iperf-port "$IPERF_PORT"
         ;;
       3)
-        printf "请输入 iperf3 对端主机："
-        read host
-        printf "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先："
-        read obj
+        if ! prompt_read "请输入 iperf3 对端主机："; then pause_for_enter; continue; fi
+        host="$PROMPT_REPLY"
+        if ! prompt_read "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先："; then pause_for_enter; continue; fi
+        obj="$PROMPT_REPLY"
         case "$obj" in
           1) objective="retrans" ;;
           2) objective="throughput" ;;
@@ -1489,19 +1662,19 @@ menu() {
         esac
         auto_tune "$host" "$IPERF_PORT" "$objective" 0 5 1
         ;;
-      4) status_full ;;
+      4) clear_screen; print_header "状态"; status_full; pause_for_enter ;;
       5)
-        printf "请输入本地带宽 Mbps："
-        read local_mbps
-        printf "请输入对端带宽 Mbps："
-        read peer_mbps
-        printf "请输入 RTT 延迟 ms："
-        read rtt_ms
-        printf "请输入内存 MiB，直接回车自动识别："
-        read mem_input
+        if ! prompt_read "请输入本地带宽 Mbps："; then pause_for_enter; continue; fi
+        local_mbps="$PROMPT_REPLY"
+        if ! prompt_read "请输入对端带宽 Mbps："; then pause_for_enter; continue; fi
+        peer_mbps="$PROMPT_REPLY"
+        if ! prompt_read "请输入 RTT 延迟 ms："; then pause_for_enter; continue; fi
+        rtt_ms="$PROMPT_REPLY"
+        if ! prompt_read "请输入内存 MiB，直接回车自动识别："; then pause_for_enter; continue; fi
+        mem_input="$PROMPT_REPLY"
         [ -n "$mem_input" ] || mem_input="$(memory_mb)"
-        printf "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先："
-        read obj
+        if ! prompt_read "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先："; then pause_for_enter; continue; fi
+        obj="$PROMPT_REPLY"
         case "$obj" in
           1) objective="retrans" ;;
           2) objective="throughput" ;;
@@ -1509,21 +1682,24 @@ menu() {
           *) objective="retrans" ;;
         esac
         print_recommendation "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0
-        printf "是否即时保存这组智能参数？[y/N] "
-        read save_ans
+        if ! prompt_read "是否即时保存这组智能参数？[y/N] "; then save_ans=""; else save_ans="$PROMPT_REPLY"; fi
         case "$save_ans" in
           y|Y) apply_smart "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0 ;;
         esac
+        pause_for_enter
         ;;
       6)
+        clear_screen
+        print_header "TCP 预设"
         list_profiles
-        printf "请输入中文预设名或英文别名："
-        read profile
+        if ! prompt_read "请输入中文预设名或英文别名："; then pause_for_enter; continue; fi
+        profile="$PROMPT_REPLY"
         apply_profile "$profile"
+        pause_for_enter
         ;;
-      7) rollback_last ;;
+      7) clear_screen; print_header "回滚"; rollback_last; pause_for_enter ;;
       0) exit 0 ;;
-      *) echo "无效选择。" ;;
+      *) warn "无效选择。"; pause_for_enter ;;
     esac
   done
 }

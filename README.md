@@ -52,7 +52,8 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 .\tcp-tune.ps1 client -Peer http://SERVER:39188 -Token TOKEN -IperfPort 5201 -Direction download -Yes
 ```
 
-客户端连接后会进入客户端菜单。服务端如果在交互终端运行，会进入服务端菜单。
+服务端启动完成后会清屏显示会话面板、客户端连接命令和服务端菜单。客户端连接后会进入客户端菜单。
+即使使用 `curl | sh` 这种管道方式运行，菜单也会从当前终端读取输入，不会因为标准输入被脚本流占用而自动退出。
 
 ## 菜单能力
 
