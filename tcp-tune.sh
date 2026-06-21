@@ -69,47 +69,66 @@ pause_for_enter() {
   fi
 }
 
+# 显示宽度计算：中文等 CJK 字符占 2 列，ASCII 占 1 列
+# 用 awk 按 UTF-8 字节范围统计 CJK 字符数，补齐到指定显示宽度
+ui_pad() {
+  text="$1"
+  width="$2"
+  printf '%s' "$text" | awk -v w="$width" '{
+    s = $0
+    disp = 0
+    n = length(s)
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      # 按 UTF-8 首字节判断是否多字节字符（>=0xC2 开头）
+      if (c >= "\303") disp += 2; else disp += 1
+    }
+    pad = w - disp
+    if (pad > 0) printf "%s%*s", s, pad, ""
+    else printf "%s", s
+  }'
+}
+
 print_rule() {
-  printf "%s%s%s\n" "$COLOR_CYAN" "------------------------------------------------------------" "$COLOR_RESET"
+  printf "%s%s%s\n" "$COLOR_CYAN" "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" "$COLOR_RESET"
 }
 
 print_header() {
   title="$1"
-  printf "%s%s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$title" "$COLOR_RESET"
+  printf "\n  %s%s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$title" "$COLOR_RESET"
   print_rule
 }
 
 print_kv() {
   label="$1"
   value="$2"
-  printf "  %s%-14s%s %s\n" "$COLOR_BLUE" "$label" "$COLOR_RESET" "$value"
+  printf "  %s%s%s  %s\n" "$COLOR_BLUE" "$(ui_pad "$label" 12)" "$COLOR_RESET" "$value"
 }
 
 ui_rule() {
-  printf "%s%s%s\n" "$COLOR_CYAN" "------------------------------------------------------------" "$COLOR_RESET"
+  printf "%s%s%s\n" "$COLOR_DIM" "────────────────────────────────────────────────────────────" "$COLOR_RESET"
 }
 
 ui_row() {
   label="$1"
   value="$2"
-  printf "  %s%-10s%s %s\n" "$COLOR_BOLD" "$label" "$COLOR_RESET" "$value"
+  printf "  %s%s%s  %s\n" "$COLOR_BOLD" "$(ui_pad "$label" 12)" "$COLOR_RESET" "$value"
 }
 
 ui_section() {
   title="$1"
-  printf "%s%s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$title" "$COLOR_RESET"
-  ui_rule
+  printf "  %s▎%s %s%s%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_BOLD$COLOR_CYAN" "$title" "$COLOR_RESET"
 }
 
 ui_note() {
   label="$1"
   text="$2"
-  printf "  %s%-8s%s %s\n" "$COLOR_DIM" "$label" "$COLOR_RESET" "$text"
+  printf "  %s%s%s  %s%s%s\n" "$COLOR_DIM" "$(ui_pad "$label" 12)" "$COLOR_RESET" "$COLOR_DIM" "$text" "$COLOR_RESET"
 }
 
 ui_subtitle() {
   text="$1"
-  printf "%s%s%s\n" "$COLOR_DIM" "$text" "$COLOR_RESET"
+  printf "  %s%s%s\n" "$COLOR_DIM" "$text" "$COLOR_RESET"
 }
 
 ui_mode_card() {
@@ -117,8 +136,8 @@ ui_mode_card() {
   title="$2"
   desc="$3"
   target="$4"
-  printf "  %s[%s]%s %s%-10s%s %s\n" "$COLOR_CYAN" "$number" "$COLOR_RESET" "$COLOR_BOLD" "$title" "$COLOR_RESET" "$desc"
-  printf "      %s目标：%s%s\n" "$COLOR_DIM" "$target" "$COLOR_RESET"
+  printf "  %s[%s]%s %s%s%s  %s\n" "$COLOR_CYAN" "$number" "$COLOR_RESET" "$COLOR_BOLD" "$(ui_pad "$title" 10)" "$COLOR_RESET" "$desc"
+  printf "           %s目标：%s%s\n" "$COLOR_DIM" "$target" "$COLOR_RESET"
 }
 
 metric_line() {
@@ -131,7 +150,23 @@ metric_line() {
     bad) color="$COLOR_RED" ;;
     *) color="$COLOR_CYAN" ;;
   esac
-  printf "  %-8s %s%s%s\n" "$label" "$color" "$value" "$COLOR_RESET"
+  printf "  %s  %s%s%s\n" "$(ui_pad "$label" 10)" "$color" "$value" "$COLOR_RESET"
+}
+
+ui_menu_group() {
+  text="$1"
+  printf "  %s%s%s\n" "$COLOR_CYAN" "$text" "$COLOR_RESET"
+}
+
+ui_menu_item() {
+  number="$1"
+  title="$2"
+  desc="$3"
+  color="${4:-$COLOR_CYAN}"
+  printf "  %s[%s]%s %s%s%s  %s%s%s\n" \
+    "$color" "$number" "$COLOR_RESET" \
+    "$COLOR_BOLD" "$(ui_pad "$title" 16)" "$COLOR_RESET" \
+    "$COLOR_DIM" "$desc" "$COLOR_RESET"
 }
 
 trend_label() {
@@ -1038,12 +1073,12 @@ percent_delta() {
 progress_steps() {
   round="$1"
   rounds="$2"
-  printf "  %s连接测试%s -> %s分析结果%s -> %s应用调整%s -> %s复测确认%s\n" \
-    "$COLOR_GREEN" "$COLOR_RESET" \
-    "$COLOR_GREEN" "$COLOR_RESET" \
+  printf "  %s%s连接测试%s → %s分析结果%s → %s应用调整%s → %s复测确认%s\n" \
+    "$COLOR_BOLD" "$COLOR_GREEN" "$COLOR_RESET" \
+    "$COLOR_CYAN" "$COLOR_RESET" \
     "$COLOR_CYAN" "$COLOR_RESET" \
     "$COLOR_DIM" "$COLOR_RESET"
-  printf "  轮次 %s/%s\n" "$round" "$rounds"
+  printf "  %s轮次 %s/%s%s\n" "$COLOR_DIM" "$round" "$rounds" "$COLOR_RESET"
 }
 
 start_iperf_server() {
@@ -1448,12 +1483,13 @@ auto_tune() {
   esac
   echo
   ui_section "优化前后"
-  printf "  %-12s %-16s %-16s %-12s\n" "指标" "优化前" "优化后" "变化"
-  printf "  %-12s %-16s %-16s %-12s\n" "传输速度" "$first_rate" "$final_rate" "$speed_delta"
-  printf "  %-12s %-16s %-16s %-12s\n" "重传次数" "$first_retr_text" "$final_retr_text" "$retr_delta"
+  printf "  %s%s │ %-14s │ %-14s │ %-10s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$(ui_pad "指标" 12)" "优化前" "优化后" "变化" "$COLOR_RESET"
+  printf "  %s─────────────┼────────────────┼────────────────┼──────────%s\n" "$COLOR_DIM" "$COLOR_RESET"
+  printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "传输速度" 12)" "$first_rate" "$final_rate" "$speed_delta"
+  printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "重传次数" 12)" "$first_retr_text" "$final_retr_text" "$retr_delta"
   if [ "$objective" = "startup" ]; then
     startup_delta="$(percent_delta "${first_startup_bps:-0}" "$final_startup_bps")"
-    printf "  %-12s %-16s %-16s %-12s\n" "首秒速度" "$first_startup_rate" "$final_startup_rate" "$startup_delta"
+    printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "首秒速度" 12)" "$first_startup_rate" "$final_startup_rate" "$startup_delta"
   fi
   echo
   ui_section "配置摘要"
@@ -1472,10 +1508,10 @@ auto_tune() {
   fi
   echo
   ui_section "下一步操作"
-  printf "  %s[1]%s 返回客户端主页\n" "$COLOR_CYAN" "$COLOR_RESET"
-  printf "  %s[2]%s 换一种模式继续优化\n" "$COLOR_CYAN" "$COLOR_RESET"
-  printf "  %s[3]%s 查看详细参数\n" "$COLOR_CYAN" "$COLOR_RESET"
-  printf "  %s[4]%s 回滚本次修改\n" "$COLOR_CYAN" "$COLOR_RESET"
+  ui_menu_item "1" "返回客户端主页" "回到操作菜单"
+  ui_menu_item "2" "换一种模式继续" "重新选择优化目标"
+  ui_menu_item "3" "查看详细参数" "检查当前 TCP 配置"
+  ui_menu_item "4" "回滚本次修改" "恢复优化前的系统参数" "$COLOR_YELLOW"
 }
 
 random_token() {
@@ -1814,8 +1850,7 @@ for entry in reports:
             device["role"] = role
         device["last"] = max(device["last"], entry.get("time", 0))
 
-print("已接入客户端")
-print("------------------------------------------------------------")
+print("  ▎ 已接入客户端")
 if not devices:
     print("  暂无客户端，等待连接...")
 else:
@@ -1824,8 +1859,7 @@ else:
         print(f"  ● {device['os']} · {device['ip']}  最近上报 {seen}")
 
 print()
-print("最近结果")
-print("------------------------------------------------------------")
+print("  ▎ 最近结果")
 if not results:
     print("  尚未收到测速结果。")
 else:
@@ -1837,12 +1871,14 @@ else:
     retransmits = int(float(payload.get("retransmits") or 0))
     round_no = payload.get("round") or "-"
     rounds = payload.get("rounds") or "-"
-    print(f"  模式：{objective}  方向：{direction}  轮次：{round_no}/{rounds}")
-    print(f"  速度：{rate}  重传：{retransmits:,} 次")
+    print(f"  模式  {objective}")
+    print(f"  方向  {direction}")
+    print(f"  轮次  {round_no}/{rounds}")
+    print(f"  速度  {rate}")
+    print(f"  重传  {retransmits:,} 次")
 
 print()
-print("最近事件")
-print("------------------------------------------------------------")
+print("  ▎ 最近事件")
 events = state.get("events", [])[-5:]
 if not events:
     print("  服务端已启动，等待客户端上报。")
@@ -2030,8 +2066,9 @@ run_client_optimization() {
 
   echo
   ui_section "测试方向"
-  printf "  %s[1]%s 下载  服务端 -> 本机\n" "$COLOR_CYAN" "$COLOR_RESET"
-  printf "  %s[2]%s 上传  本机 -> 服务端\n" "$COLOR_CYAN" "$COLOR_RESET"
+  ui_menu_item "1" "下载" "服务端 → 本机"
+  ui_menu_item "2" "上传" "本机 → 服务端"
+  echo
   ui_note "当前选择" "$selected_label · 默认下载方向"
   if ! prompt_read "请选择测试方向 [1-2]："; then return 1; fi
   case "$PROMPT_REPLY" in
@@ -2053,17 +2090,17 @@ client_menu() {
     render_client_dashboard "$peer" "$client_lan_ip" "$iperf_port"
     echo
     ui_section "操作菜单"
-    printf "%s优化%s\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s[1]%s 开始优化                 %s重传 / 吞吐 / 快速起速%s\n" "$COLOR_GREEN" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
+    ui_menu_group "优化"
+    ui_menu_item "1" "开始优化" "重传 / 吞吐 / 快速起速" "$COLOR_GREEN"
     echo
-    printf "%s状态%s\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s[2]%s 查看本机状态             %s系统 / TCP 参数%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
-    printf "  %s[3]%s 查看服务端状态           %s会话 / 测速服务%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
-    printf "  %s[4]%s 查看过程记录             %s任务 / 结果%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
+    ui_menu_group "状态"
+    ui_menu_item "2" "查看本机状态" "系统 / TCP 参数"
+    ui_menu_item "3" "查看服务端状态" "会话 / 测速服务"
+    ui_menu_item "4" "查看过程记录" "任务 / 结果"
     echo
-    printf "%s退出%s\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s[5]%s 停止双方会话并退出       %s清理 Agent / iperf3%s\n" "$COLOR_YELLOW" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
-    printf "  %s[0]%s 退出客户端               %s不停止服务端会话%s\n" "$COLOR_DIM" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
+    ui_menu_group "退出"
+    ui_menu_item "5" "停止会话并退出" "清理 Agent / iperf3" "$COLOR_YELLOW"
+    ui_menu_item "0" "退出客户端" "不停止服务端会话" "$COLOR_DIM"
     echo
     if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
       warn "当前环境没有可用交互输入，客户端已保持连接上报后退出菜单。"
@@ -2104,14 +2141,20 @@ menu() {
   while true; do
     clear_screen
     print_header "$APP_NAME $APP_VERSION"
-    printf "  %s1%s 启动调优会话\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s2%s 加入调优会话\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s3%s 自动优化\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s4%s 查看双方/本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s5%s 智能推荐参数\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s6%s 选择固定预设\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s7%s 回滚最近修改\n" "$COLOR_YELLOW" "$COLOR_RESET"
-    printf "  %s0%s 退出\n" "$COLOR_DIM" "$COLOR_RESET"
+    echo
+    ui_menu_group "会话"
+    ui_menu_item "1" "启动调优会话" "作为服务端，等待客户端连接" "$COLOR_GREEN"
+    ui_menu_item "2" "加入调优会话" "作为客户端，连接已有服务端"
+    echo
+    ui_menu_group "调优"
+    ui_menu_item "3" "自动优化" "选择目标，自动测速迭代调参"
+    ui_menu_item "4" "查看状态" "双方 / 本机 TCP 参数"
+    ui_menu_item "5" "智能推荐参数" "根据带宽、RTT、内存生成建议"
+    ui_menu_item "6" "选择固定预设" "从预设配置列表中选择"
+    echo
+    ui_menu_group "管理"
+    ui_menu_item "7" "回滚最近修改" "恢复优化前的系统参数" "$COLOR_YELLOW"
+    ui_menu_item "0" "退出" "关闭脚本" "$COLOR_DIM"
     echo
     if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
       warn "当前环境没有可用交互输入。"

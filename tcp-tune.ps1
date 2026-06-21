@@ -18,59 +18,96 @@
 $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/10000ge10000/TCP-optimization"
 
+# 显示宽度感知的 padding：中文字符占 2 列，ASCII 占 1 列
+function Format-Pad {
+  param([string]$Text, [int]$Width)
+  $displayWidth = 0
+  foreach ($ch in $Text.ToCharArray()) {
+    $code = [int]$ch
+    if ($code -ge 0x1100 -and ($code -le 0x115F -or ($code -ge 0x2E80 -and $code -le 0xA4CF) -or ($code -ge 0xAC00 -and $code -le 0xD7A3) -or ($code -ge 0xF900 -and $code -le 0xFAFF) -or ($code -ge 0xFE30 -and $code -le 0xFE4F) -or ($code -ge 0xFF00 -and $code -le 0xFF60) -or ($code -ge 0xFFE0 -and $code -le 0xFFE6))) {
+      $displayWidth += 2
+    } else {
+      $displayWidth += 1
+    }
+  }
+  $pad = $Width - $displayWidth
+  if ($pad -gt 0) {
+    return $Text + (" " * $pad)
+  }
+  return $Text
+}
+
 function Write-Rule {
-  Write-Host ("-" * 60) -ForegroundColor Cyan
+  Write-Host ("━" * 58) -ForegroundColor Cyan
 }
 
 function Write-Header {
   param([string]$Title)
   Clear-Host
-  Write-Host $Title -ForegroundColor Cyan
+  Write-Host ""
+  Write-Host "  $Title" -ForegroundColor Cyan
   Write-Rule
 }
 
 function Write-KeyValue {
   param([string]$Label, [string]$Value)
-  Write-Host ("  {0,-12} {1}" -f $Label, $Value)
+  $padded = Format-Pad -Text $Label -Width 12
+  Write-Host "  $padded  $Value"
 }
 
 function Write-PanelRule {
-  Write-Host ("-" * 60) -ForegroundColor Cyan
+  Write-Host ("─" * 58) -ForegroundColor DarkGray
 }
 
 function Write-PanelRow {
   param([string]$Label, [string]$Value)
-  Write-Host ("  {0,-10} {1}" -f $Label, $Value)
+  $padded = Format-Pad -Text $Label -Width 12
+  Write-Host "  $padded  $Value"
 }
 
 function Write-Section {
   param([string]$Title)
-  Write-Host $Title -ForegroundColor Cyan
-  Write-PanelRule
+  Write-Host "  ▎ $Title" -ForegroundColor Cyan
 }
 
 function Write-Note {
   param([string]$Label, [string]$Text)
-  Write-Host ("  {0,-8} {1}" -f $Label, $Text) -ForegroundColor DarkGray
+  $padded = Format-Pad -Text $Label -Width 12
+  Write-Host "  $padded  $Text" -ForegroundColor DarkGray
 }
 
 function Write-Subtitle {
   param([string]$Text)
-  Write-Host $Text -ForegroundColor DarkGray
+  Write-Host "  $Text" -ForegroundColor DarkGray
 }
 
 function Write-ModeCard {
   param([string]$Number, [string]$Title, [string]$Description, [string]$Target, [string]$Color = "Cyan")
-  Write-Host ("  [{0}] " -f $Number) -NoNewline -ForegroundColor $Color
-  Write-Host $Title -NoNewline -ForegroundColor White
-  Write-Host ("  {0}" -f $Description)
-  Write-Host ("      目标：{0}" -f $Target) -ForegroundColor DarkGray
+  $padded = Format-Pad -Text $Title -Width 10
+  Write-Host "  [$Number] " -NoNewline -ForegroundColor $Color
+  Write-Host $padded -NoNewline -ForegroundColor White
+  Write-Host "  $Description"
+  Write-Host ("           目标：{0}" -f $Target) -ForegroundColor DarkGray
 }
 
 function Write-MetricLine {
   param([string]$Label, [string]$Value, [string]$Color = "Cyan")
-  Write-Host ("  {0,-8} " -f $Label) -NoNewline
+  $padded = Format-Pad -Text $Label -Width 10
+  Write-Host "  $padded  " -NoNewline
   Write-Host $Value -ForegroundColor $Color
+}
+
+function Write-MenuGroup {
+  param([string]$Text)
+  Write-Host "  $Text" -ForegroundColor Cyan
+}
+
+function Write-MenuItem {
+  param([string]$Number, [string]$Title, [string]$Description, [string]$Color = "Cyan")
+  $padded = Format-Pad -Text $Title -Width 16
+  Write-Host "  [$Number] " -NoNewline -ForegroundColor $Color
+  Write-Host $padded -NoNewline -ForegroundColor White
+  Write-Host "  $Description" -ForegroundColor DarkGray
 }
 
 function Get-PercentDelta {
@@ -277,6 +314,7 @@ function Invoke-WindowsOptimization {
   Write-Subtitle "$directionName · 本机 $LocalAddress · 第 1/$SelectedRounds 轮"
   Write-Host ""
   Write-Section "优化概览"
+  Write-PanelRow "模式" $modeName
   Write-PanelRow "测试方向" $directionName
   Write-PanelRow "本机地址" $LocalAddress
   Write-PanelRow "测速节点" "已连接的服务端"
@@ -293,7 +331,8 @@ function Invoke-WindowsOptimization {
   for ($round = 1; $round -le $SelectedRounds; $round++) {
     Write-Host ""
     Write-Section ("第 {0}/{1} 轮测试" -f $round, $SelectedRounds)
-    Write-Host "  连接测试 -> 分析结果 -> 应用建议 -> 复测确认" -ForegroundColor Cyan
+    Write-Host "  连接测试 → 分析结果 → 应用调整 → 复测确认" -ForegroundColor Cyan
+    Write-Host ("  轮次 {0}/{1}" -f $round, $SelectedRounds) -ForegroundColor DarkGray
     Write-Note "状态" "正在用 iperf3 测试真实链路..."
     $result = Run-Iperf -HostName $HostName -Port $Port -LocalAddress $LocalAddress -Reverse:($SelectedDirection -eq "download")
     $metrics = Get-IperfMetrics -Result $result
@@ -358,18 +397,29 @@ function Invoke-WindowsOptimization {
   }
   Write-Host ""
   Write-Section "优化前后"
-  Write-Host ("  {0,-12} {1,-16} {2,-16} {3,-12}" -f "指标", "优化前", "优化后", "变化")
-  Write-Host ("  {0,-12} {1,-16} {2,-16} {3,-12}" -f "传输速度", $firstRateText, $lastRateText, $speedDelta)
-  Write-Host ("  {0,-12} {1,-16} {2,-16} {3,-12}" -f "重传次数", ("{0:N0}" -f $firstMetrics.Retransmits), ("{0:N0}" -f $lastMetrics.Retransmits), $retrDelta)
+  $hdrLabel = Format-Pad -Text "指标" -Width 12
+  Write-Host ("  $hdrLabel │ {0,-14} │ {1,-14} │ {2,-10}" -f "优化前", "优化后", "变化") -ForegroundColor Cyan
+  Write-Host ("  {0}" -f ("─" * 57)) -ForegroundColor DarkGray
+  $lbl1 = Format-Pad -Text "传输速度" -Width 12
+  Write-Host ("  $lbl1 │ {0,-14} │ {1,-14} │ {2,-10}" -f $firstRateText, $lastRateText, $speedDelta)
+  $lbl2 = Format-Pad -Text "重传次数" -Width 12
+  Write-Host ("  $lbl2 │ {0,-14} │ {1,-14} │ {2,-10}" -f ("{0:N0}" -f $firstMetrics.Retransmits), ("{0:N0}" -f $lastMetrics.Retransmits), $retrDelta)
+  if ($SelectedObjective -eq "startup") {
+    $startupDelta = Get-PercentDelta -Before $firstMetrics.FirstSecondBitsPerSecond -After $lastMetrics.FirstSecondBitsPerSecond
+    $firstStartupText = Format-Rate $firstMetrics.FirstSecondBitsPerSecond
+    $lastStartupText = Format-Rate $lastMetrics.FirstSecondBitsPerSecond
+    $lbl3 = Format-Pad -Text "首秒速度" -Width 12
+    Write-Host ("  $lbl3 │ {0,-14} │ {1,-14} │ {2,-10}" -f $firstStartupText, $lastStartupText, $startupDelta)
+  }
   Write-Host ""
   Write-Section "配置摘要"
   Write-Note "Windows" "未自动修改 TCP 栈；以上为真实链路测试结果和优化建议。"
   Write-Host ""
   Write-Section "下一步操作"
-  Write-Host "  [1] 返回客户端主页"
-  Write-Host "  [2] 换一种模式继续优化"
-  Write-Host "  [3] 查看详细参数"
-  Write-Host "  [4] 回滚本次修改"
+  Write-MenuItem "1" "返回客户端主页" "回到操作菜单"
+  Write-MenuItem "2" "换一种模式继续" "重新选择优化目标"
+  Write-MenuItem "3" "查看详细参数" "检查当前 TCP 配置"
+  Write-MenuItem "4" "回滚本次修改" "恢复优化前的系统参数" "Yellow"
 }
 
 function Select-WindowsOptimization {
@@ -405,24 +455,17 @@ function Invoke-ClientMenu {
     Show-ClientDashboard -LocalAddress $LocalAddress -Port $Port
     Write-Host ""
     Write-Section "操作菜单"
-    Write-Host "优化" -ForegroundColor Cyan
-    Write-Host "  [1] " -NoNewline -ForegroundColor Green
-    Write-Host "开始优化                 " -NoNewline
-    Write-Host "重传 / 吞吐 / 快速起速" -ForegroundColor DarkGray
+    Write-MenuGroup "优化"
+    Write-MenuItem "1" "开始优化" "重传 / 吞吐 / 快速起速" "Green"
     Write-Host ""
-    Write-Host "状态" -ForegroundColor Cyan
-    Write-Host "  [2] 查看本机状态             " -NoNewline
-    Write-Host "系统 / TCP 参数" -ForegroundColor DarkGray
-    Write-Host "  [3] 查看服务端状态           " -NoNewline
-    Write-Host "会话 / 测速服务" -ForegroundColor DarkGray
-    Write-Host "  [4] 查看过程记录             " -NoNewline
-    Write-Host "任务 / 结果" -ForegroundColor DarkGray
+    Write-MenuGroup "状态"
+    Write-MenuItem "2" "查看本机状态" "系统 / TCP 参数"
+    Write-MenuItem "3" "查看服务端状态" "会话 / 测速服务"
+    Write-MenuItem "4" "查看过程记录" "任务 / 结果"
     Write-Host ""
-    Write-Host "退出" -ForegroundColor Cyan
-    Write-Host "  [5] 停止双方会话并退出       " -NoNewline -ForegroundColor Yellow
-    Write-Host "清理 Agent / iperf3" -ForegroundColor DarkGray
-    Write-Host "  [0] 退出客户端               " -NoNewline -ForegroundColor DarkGray
-    Write-Host "不停止服务端会话" -ForegroundColor DarkGray
+    Write-MenuGroup "退出"
+    Write-MenuItem "5" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
+    Write-MenuItem "0" "退出客户端" "不停止服务端会话" "DarkGray"
     $choice = Read-Host "请选择"
     switch ($choice) {
       "1" { Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress; Read-Host "按回车返回菜单" | Out-Null }
