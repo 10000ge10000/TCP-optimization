@@ -160,7 +160,7 @@ sudo sh tcp-tune.sh --yes auto \
   --rounds 3
 ```
 
-如果测试目标与本机公网出口相同，但你确认这是有效链路，可以增加：
+如果测试目标与本机公网出口相同，脚本现在只提示风险并继续测试；`--allow-same-public-ip` 保留为兼容旧命令的参数：
 
 ```sh
 --allow-same-public-ip

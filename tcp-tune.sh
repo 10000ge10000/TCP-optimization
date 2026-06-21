@@ -1196,7 +1196,7 @@ auto_tune() {
   [ -n "$memory_mb_value" ] || memory_mb_value="$(memory_mb)"
   local_public_ip="$(public_ip || true)"
   if [ "$allow_same_public" != "1" ] && [ -n "$local_public_ip" ] && [ "$host" = "$local_public_ip" ]; then
-    die "对端地址 $host 与本机公网出口 $local_public_ip 相同，疑似 NAT hairpin/自测链路。请换用真实对端公网地址，或添加 --allow-same-public-ip 强制测试。"
+    warn "对端地址 $host 与本机公网出口 $local_public_ip 相同，可能是代理出口/NAT hairpin；已按真实链路继续测试。"
   fi
 
   bind_ip="$(local_lan_ipv4 || true)"
