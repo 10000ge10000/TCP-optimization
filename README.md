@@ -2,7 +2,7 @@
 
 仓库地址：<https://github.com/10000ge10000/TCP-optimization>
 
-`TCP-optimization` 是一个双端 TCP 调优工具。它面向 VPS + OpenWrt / Linux / macOS / Windows 客户端的真实链路测试：服务端一条命令启动，客户端复制命令加入，双方通过临时 Agent 通讯，用 iperf3 测速结果驱动 TCP 参数优化。
+`TCP-optimization` 是一个双端 TCP 调优工具。它面向 VPS + OpenWrt / Linux / macOS / Windows 客户端的真实链路测试：服务端一条命令启动并保持只读监控，客户端复制命令加入，通过临时 Agent 通讯，用 iperf3 测速结果驱动客户端本机 TCP 参数优化。
 
 ## 最短使用路径
 
@@ -22,6 +22,8 @@ sudo sh tcp-tune.sh --yes server
 - iperf3 server，默认端口 `5201`
 - 随机 token
 - OpenWrt / Linux / macOS / Windows 客户端运行命令
+
+服务端不会进入操作菜单，也不会修改本机 TCP 参数。窗口会持续显示已接入客户端、最近测速结果和事件；按 `Ctrl+C`、客户端请求停止或 TTL 到期时，脚本会清理 Agent、iperf3 和会话凭据后退出。
 
 如果自动识别的公网地址不准，可以手动指定：
 
@@ -52,21 +54,18 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 .\tcp-tune.ps1 client -Peer http://SERVER:39188 -Token TOKEN -IperfPort 5201 -Direction download -Yes
 ```
 
-服务端启动完成后会清屏显示会话面板、客户端连接命令和服务端菜单。客户端连接后会进入客户端菜单。
+服务端启动完成后会显示只读监控面板和客户端连接命令。客户端连接后会进入客户端菜单。
 即使使用 `curl | sh` 这种管道方式运行，菜单也会从当前终端读取输入，不会因为标准输入被脚本流占用而自动退出。
 
 ## 菜单能力
 
-服务端菜单：
+服务端没有交互菜单，仅负责：
 
-```text
-1. 查看服务端状态
-2. 查看客户端上报/事件
-3. 运行服务端本机优化
-4. 重新显示客户端运行命令
-5. 停止会话并退出
-0. 退出菜单但保留服务
-```
+- 展示各系统客户端运行命令
+- 展示已接入客户端、LAN 地址和最近上报时间
+- 展示最近测速模式、方向、速率、重传和事件
+- 提供临时 Agent 与 iperf3 测速端点
+- 在 Ctrl+C、远程停止或 TTL 到期时安全清理
 
 客户端菜单：
 
@@ -78,8 +77,7 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 2. 查看本机状态
 3. 查看服务端状态
 4. 查看过程记录
-5. 高级：请求服务端优化
-6. 停止双方会话并退出
+5. 停止双方会话并退出
 0. 退出客户端
 ```
 
@@ -87,10 +85,9 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 
 优化过程使用面向用户的摘要：优化模式、测试方向、当前轮次、Mbps/Gbps、重传次数、变化趋势、当前调整动作和最终结论。`rmem/wmem`、`tcp_notsent_lowat`、`tcp_limit_output_bytes` 等原始参数不再占据主流程，但仍会写入配置并保留回滚备份。
 
-Windows PowerShell 客户端使用相同的中文菜单和三种模式，并额外显示快速起速模式的首秒速度。Windows 端默认只执行真实链路测试、目标判定和优化建议，不自动写 Windows TCP 栈；Linux/OpenWrt 客户端才会自动保存内核参数。
-跨端优化使用异步任务：Agent 会立即返回任务 ID，客户端持续轮询状态并在完成后显示优化输出，避免长时间 iperf3 测试被代理或反向代理中断 HTTP 连接。
+Windows PowerShell 客户端使用相同的中文菜单和三种模式，并额外显示快速起速模式的首秒速度。Windows 端默认只执行真实链路测试、目标判定和优化建议，不自动写 Windows TCP 栈；Linux/OpenWrt 客户端才会自动保存内核参数。服务端始终保持只读，不接受参数写入。
 
-客户端交互稿：[Figma 设计](https://www.figma.com/design/kiyIiPBnkOSSrFqmnU0DJG)。
+客户端与服务端交互稿：[Figma 设计](https://www.figma.com/design/kiyIiPBnkOSSrFqmnU0DJG)。
 
 ## 常用命令
 

@@ -1138,6 +1138,12 @@ auto_tune() {
         printf "  趋势：重传保持不变\n"
       fi
     fi
+    if [ -n "${TUNE_REPORT_PEER:-}" ] && [ -n "${TUNE_REPORT_TOKEN:-}" ]; then
+      report_direction="download"
+      [ "$reverse" = "0" ] && report_direction="upload"
+      report_data="{\"role\":\"client-result\",\"lan_ip\":\"${TUNE_CLIENT_IP:-$display_local_ip}\",\"round\":$i,\"rounds\":$rounds,\"objective\":\"$objective\",\"direction\":\"$report_direction\",\"retransmits\":$retr,\"bits_per_second\":$bps,\"time\":$(date +%s)}"
+      post_json "$TUNE_REPORT_PEER/report" "$TUNE_REPORT_TOKEN" "$report_data" >/dev/null 2>&1 || true
+    fi
 
     measured_mbps="$(awk -v bps="$bps" 'BEGIN {v=bps/1000000; if (v < 1) v=1; printf "%d\n", v}')"
     [ "$peer_mbps" = "0" ] && peer_mbps="$measured_mbps"
@@ -1209,7 +1215,6 @@ write_agent_py() {
 import http.server
 import json
 import os
-import secrets
 import signal
 import subprocess
 import threading
@@ -1225,9 +1230,7 @@ STATE = {
     "started_at": STARTED,
     "peer_reports": [],
     "events": [],
-    "jobs": {},
 }
-OPTIMIZE_LOCK = threading.Lock()
 ACTIVE_PROCESSES = set()
 ACTIVE_PROCESSES_LOCK = threading.Lock()
 
@@ -1242,17 +1245,6 @@ def write_json(handler, code, payload):
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     handler.send_response(code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    try:
-        handler.wfile.write(body)
-    except (BrokenPipeError, ConnectionResetError):
-        pass
-
-def write_text(handler, code, payload):
-    body = payload.encode("utf-8")
-    handler.send_response(code)
-    handler.send_header("Content-Type", "text/plain; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     try:
@@ -1306,29 +1298,6 @@ def safe_choice(value, allowed, default):
     value = str(value or default)
     return value if value in allowed else default
 
-def run_optimize_job(job_id, args):
-    job = STATE["jobs"][job_id]
-    with OPTIMIZE_LOCK:
-        job["status"] = "running"
-        job["started_at"] = time.time()
-        STATE["events"].append({"time": time.time(), "action": "optimize-running", "job_id": job_id})
-        try:
-            result = run_cmd(args)
-        except OSError as exc:
-            result = {"code": 127, "stdout": "", "stderr": f"启动优化进程失败：{exc}"}
-        job["result"] = result
-        job["status"] = "completed" if result["code"] == 0 else "failed"
-        job["finished_at"] = time.time()
-        STATE["events"].append({
-            "time": time.time(),
-            "action": "optimize-completed",
-            "job_id": job_id,
-            "host": job["host"],
-            "direction": job["direction"],
-            "objective": job["objective"],
-            "result": result["code"],
-        })
-
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "tcp-tune-agent/0.1"
 
@@ -1358,28 +1327,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = run_cmd([SCRIPT, "status"])
             write_json(self, 200, {"ok": result["code"] == 0, "result": result})
             return
-        if path.startswith("/jobs/"):
-            parts = path.strip("/").split("/")
-            job_id = parts[1] if len(parts) >= 2 else ""
-            job = STATE["jobs"].get(job_id)
-            if not job:
-                write_json(self, 404, {"ok": False, "error": "job not found"})
-                return
-            if len(parts) == 3 and parts[2] == "output":
-                result = job.get("result", {})
-                output = result.get("stdout", "")
-                if result.get("stderr"):
-                    output += ("\n" if output else "") + result["stderr"]
-                write_text(self, 200, output or "任务尚未产生输出。\n")
-                return
-            if len(parts) == 2:
-                public_job = {key: value for key, value in job.items() if key != "result"}
-                if "result" in job:
-                    public_job["result_code"] = job["result"]["code"]
-                write_json(self, 200, {"ok": True, "job": public_job})
-                return
-            write_json(self, 404, {"ok": False, "error": "not found"})
-            return
         write_json(self, 404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
@@ -1397,7 +1344,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/report":
             STATE["peer_reports"].append({"time": time.time(), "payload": payload})
-            STATE["events"].append({"time": time.time(), "action": "peer-report", "role": payload.get("role", "unknown")})
+            STATE["events"].append({
+                "time": time.time(),
+                "action": "peer-report",
+                "role": payload.get("role", "unknown"),
+                "lan_ip": payload.get("lan_ip", ""),
+                "os": payload.get("os", ""),
+                "round": payload.get("round"),
+                "objective": payload.get("objective", ""),
+                "direction": payload.get("direction", ""),
+                "retransmits": payload.get("retransmits"),
+                "bits_per_second": payload.get("bits_per_second"),
+            })
             write_json(self, 200, {"ok": True})
             return
         if path == "/test":
@@ -1413,39 +1371,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             STATE["events"].append({"time": time.time(), "action": "test", "host": host, "direction": direction, "result": result["code"]})
             write_json(self, 200, {"ok": result["code"] == 0, "result": result})
             return
-        if path == "/optimize":
-            host = str(payload.get("host", "")).strip()
-            if not host:
-                write_json(self, 400, {"ok": False, "error": "host is required"})
-                return
-            direction = safe_choice(payload.get("direction"), {"download", "upload"}, "download")
-            objective = safe_choice(payload.get("objective"), {"retrans", "throughput", "startup"}, "retrans")
-            args = [
-                SCRIPT, "--yes", "auto",
-                "--host", host,
-                "--port", str(safe_int(payload.get("port"), int(IPERF_PORT), 1, 65535)),
-                "--direction", direction,
-                "--objective", objective,
-                "--target-retr", str(safe_int(payload.get("target_retr"), 0, 0, 100000)),
-                "--rounds", str(safe_int(payload.get("rounds"), 3, 1, 20)),
-                "--local-mbps", str(safe_int(payload.get("local_mbps"), 0, 0, 100000)),
-                "--peer-mbps", str(safe_int(payload.get("peer_mbps"), 0, 0, 100000)),
-                "--rtt-ms", str(safe_int(payload.get("rtt_ms"), 100, 1, 10000)),
-            ]
-            if payload.get("allow_same_public_ip"):
-                args.append("--allow-same-public-ip")
-            job_id = secrets.token_hex(8)
-            STATE["jobs"][job_id] = {
-                "id": job_id,
-                "status": "queued",
-                "created_at": time.time(),
-                "host": host,
-                "direction": direction,
-                "objective": objective,
-            }
-            STATE["events"].append({"time": time.time(), "action": "optimize-queued", "job_id": job_id, "host": host, "direction": direction, "objective": objective})
-            threading.Thread(target=run_optimize_job, args=(job_id, args), daemon=True).start()
-            write_json(self, 202, {"ok": True, "accepted": True, "job_id": job_id})
+        if path in {"/optimize", "/apply-profile", "/apply-buffers"}:
+            write_json(self, 403, {"ok": False, "error": "server is read-only"})
             return
         if path == "/stop":
             STATE["events"].append({"time": time.time(), "action": "stop-request"})
@@ -1455,22 +1382,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 subprocess.run([SCRIPT, "stop-agent"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 os._exit(0)
             threading.Timer(0.3, stop_all).start()
-            return
-        if path == "/apply-profile":
-            profile = payload.get("profile", "")
-            result = run_cmd([SCRIPT, "--yes", "apply-profile", profile])
-            STATE["events"].append({"time": time.time(), "action": "apply-profile", "profile": profile, "result": result["code"]})
-            write_json(self, 200, {"ok": result["code"] == 0, "result": result})
-            return
-        if path == "/apply-buffers":
-            rmem = str(payload.get("rmem", ""))
-            wmem = str(payload.get("wmem", ""))
-            if not rmem.isdigit() or not wmem.isdigit():
-                write_json(self, 400, {"ok": False, "error": "rmem/wmem must be numeric"})
-                return
-            result = run_cmd([SCRIPT, "--yes", "apply-buffers", rmem, wmem])
-            STATE["events"].append({"time": time.time(), "action": "apply-buffers", "rmem": rmem, "wmem": wmem, "result": result["code"]})
-            write_json(self, 200, {"ok": result["code"] == 0, "result": result})
             return
         write_json(self, 404, {"ok": False, "error": "not found"})
 
@@ -1524,7 +1435,7 @@ listen_mode() {
   fi
   echo "$token" > "$STATE_DIR/agent-$AGENT_PORT.token"
   echo "$peer_url" > "$STATE_DIR/agent-$AGENT_PORT.url"
-  if [ "${SERVER_MENU_AFTER_LISTEN:-0}" != "1" ]; then
+  if [ "${SERVER_MONITOR_AFTER_LISTEN:-0}" != "1" ]; then
     render_server_dashboard "$peer_url" "$token"
   fi
 }
@@ -1542,7 +1453,7 @@ stop_agent() {
     fi
     rm -f "$pid_file"
   done
-  for session_file in "$STATE_DIR"/agent-*.token "$STATE_DIR"/agent-*.url "$STATE_DIR"/tcp-tune-agent.py; do
+  for session_file in "$STATE_DIR"/agent-*.token "$STATE_DIR"/agent-*.url "$STATE_DIR"/tcp-tune-agent.py "$STATE_DIR"/server-dashboard-*.json; do
     [ -f "$session_file" ] || continue
     rm -f "$session_file"
   done
@@ -1566,58 +1477,141 @@ get_agent_json() {
   curl -fsS -H "X-TCP-Tune-Token: $token" "$url"
 }
 
-wait_agent_job() {
-  peer="$1"
-  token="$2"
-  job_id="$3"
-  waited=0
-  max_wait="${4:-900}"
-  while [ "$waited" -lt "$max_wait" ]; do
-    response="$(get_agent_json "$peer/jobs/$job_id" "$token")" || return 1
-    status="$(printf '%s\n' "$response" | sed -n 's/.*"status":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-    case "$status" in
-      queued|running)
-        printf '\r远程优化任务：%-8s 已等待 %ss' "$status" "$waited"
-        sleep 2
-        waited=$((waited + 2))
-        ;;
-      completed)
-        printf '\r远程优化任务：completed                    \n'
-        get_agent_json "$peer/jobs/$job_id/output" "$token"
-        return 0
-        ;;
-      failed)
-        printf '\r远程优化任务：failed                       \n'
-        get_agent_json "$peer/jobs/$job_id/output" "$token" || true
-        return 1
-        ;;
-      *)
-        warn "无法识别远程任务状态。"
-        printf '%s\n' "$response"
-        return 1
-        ;;
-    esac
-  done
-  echo
-  warn "等待远程优化任务超时，可通过服务端事件继续查看。"
-  return 1
-}
-
 render_server_dashboard() {
   peer_url="$1"
   token="$2"
+  remaining="${3:-$SESSION_TTL}"
+  ttl_text="$((remaining / 60))m $((remaining % 60))s"
   clear_screen
-  print_header "$APP_NAME $APP_VERSION - 服务端会话"
-  print_kv "仓库" "$REPO_URL"
+  print_header "$APP_NAME $APP_VERSION - 服务端只读监控"
+  print_kv "运行状态" "服务运行中"
+  print_kv "运行模式" "只读监控"
   print_kv "Agent 端口" "$AGENT_PORT"
-  print_kv "iperf3 端口" "$IPERF_PORT"
-  print_kv "会话 TTL" "${SESSION_TTL}s"
-  print_kv "连接地址" "$peer_url"
-  print_kv "状态目录" "$STATE_DIR"
+  print_kv "测速端口" "$IPERF_PORT"
+  print_kv "剩余时间" "$ttl_text"
   echo
   print_client_commands "$peer_url" "$token"
   echo
-  printf "%s安全提示：%s token 只发给可信对端；调优结束后选择菜单 5 或执行 sh tcp-tune.sh stop-agent。\n" "$COLOR_YELLOW" "$COLOR_RESET"
+  render_server_activity "$token"
+  echo
+  printf "%s只读说明：%s服务端不修改 TCP 参数，所有优化由客户端在本机执行。\n" "$COLOR_GREEN" "$COLOR_RESET"
+  printf "%s安全提示：%s保持此窗口运行；按 Ctrl+C 会停止 Agent/iperf3 并清理会话凭据。\n" "$COLOR_YELLOW" "$COLOR_RESET"
+}
+
+render_server_activity() {
+  token="$1"
+  dashboard_file="$STATE_DIR/server-dashboard-$AGENT_PORT.json"
+  if ! curl -fsS -H "X-TCP-Tune-Token: $token" "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
+    printf "%s会话状态%s\n" "$COLOR_BOLD$COLOR_CYAN" "$COLOR_RESET"
+    print_rule
+    echo "  Agent 状态暂时不可读。"
+    return 0
+  fi
+  python3 - "$dashboard_file" <<'PY'
+import json
+import sys
+import time
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    state = json.load(handle).get("state", {})
+
+reports = state.get("peer_reports", [])
+devices = {}
+results = []
+for entry in reports:
+    payload = entry.get("payload", {})
+    ip = str(payload.get("lan_ip") or "").strip()
+    role = str(payload.get("role") or "unknown")
+    if payload.get("bits_per_second") is not None:
+        results.append((entry.get("time", 0), payload))
+    if ip:
+        device = devices.setdefault(ip, {"ip": ip, "os": "Unknown", "role": role, "last": 0})
+        if payload.get("os"):
+            device["os"] = str(payload["os"])
+        if role != "client-result":
+            device["role"] = role
+        device["last"] = max(device["last"], entry.get("time", 0))
+
+print("已接入客户端")
+print("------------------------------------------------------------")
+if not devices:
+    print("  暂无客户端，等待连接...")
+else:
+    for device in sorted(devices.values(), key=lambda item: item["last"], reverse=True):
+        seen = time.strftime("%H:%M:%S", time.localtime(device["last"]))
+        print(f"  ● {device['os']} · {device['ip']}  最近上报 {seen}")
+
+print()
+print("最近结果")
+print("------------------------------------------------------------")
+if not results:
+    print("  尚未收到测速结果。")
+else:
+    _, payload = results[-1]
+    objective = {"retrans": "重传优先", "throughput": "吞吐优先", "startup": "快速起速"}.get(str(payload.get("objective")), "未指定")
+    direction = "上传" if payload.get("direction") == "upload" else "下载"
+    bps = float(payload.get("bits_per_second") or 0)
+    rate = f"{bps / 1_000_000_000:.2f} Gbps" if bps >= 1_000_000_000 else f"{bps / 1_000_000:.1f} Mbps"
+    retransmits = int(float(payload.get("retransmits") or 0))
+    round_no = payload.get("round") or "-"
+    rounds = payload.get("rounds") or "-"
+    print(f"  模式：{objective}  方向：{direction}  轮次：{round_no}/{rounds}")
+    print(f"  速度：{rate}  重传：{retransmits:,} 次")
+
+print()
+print("最近事件")
+print("------------------------------------------------------------")
+events = state.get("events", [])[-5:]
+if not events:
+    print("  服务端已启动，等待客户端上报。")
+else:
+    for event in events:
+        stamp = time.strftime("%H:%M:%S", time.localtime(event.get("time", 0)))
+        if event.get("action") == "peer-report" and event.get("round") is not None:
+            text = f"收到第 {event.get('round')} 轮测速结果"
+        elif event.get("action") == "peer-report":
+            text = f"客户端上报：{event.get('lan_ip') or event.get('role', 'unknown')}"
+        elif event.get("action") == "test":
+            text = "服务端测速任务完成"
+        elif event.get("action") == "stop-request":
+            text = "收到停止会话请求"
+        else:
+            text = str(event.get("action") or "事件")
+        print(f"  {stamp}  {text}")
+PY
+}
+
+server_monitor() {
+  token_file="$STATE_DIR/agent-$AGENT_PORT.token"
+  url_file="$STATE_DIR/agent-$AGENT_PORT.url"
+  agent_pid_file="$STATE_DIR/agent-$AGENT_PORT.pid"
+  token="$(cat "$token_file" 2>/dev/null || true)"
+  peer_url="$(cat "$url_file" 2>/dev/null || true)"
+  [ -n "$token" ] || die "服务端 token 文件不存在。"
+  deadline=$(( $(date +%s) + SESSION_TTL ))
+  rendered_once=0
+  while true; do
+    if [ ! -f "$agent_pid_file" ]; then
+      info "服务端会话已停止。"
+      return 0
+    fi
+    agent_pid="$(cat "$agent_pid_file" 2>/dev/null || true)"
+    if [ -z "$agent_pid" ] || ! kill -0 "$agent_pid" >/dev/null 2>&1; then
+      warn "Agent 已退出，服务端监控结束。"
+      return 0
+    fi
+    now="$(date +%s)"
+    remaining=$((deadline - now))
+    if [ "$remaining" -le 0 ]; then
+      warn "会话已达到 TTL，正在安全停止。"
+      return 0
+    fi
+    if [ -t 1 ] || [ "$rendered_once" = "0" ]; then
+      render_server_dashboard "$peer_url" "$token" "$remaining"
+      rendered_once=1
+    fi
+    sleep 2
+  done
 }
 
 render_client_dashboard() {
@@ -1701,6 +1695,9 @@ join_mode() {
   detect_os
   client_lan_ip="$(local_lan_ipv4 || true)"
   [ -n "$client_lan_ip" ] || client_lan_ip="unknown"
+  TUNE_REPORT_PEER="$peer"
+  TUNE_REPORT_TOKEN="$token"
+  TUNE_CLIENT_IP="$client_lan_ip"
 
   report_role="join"
   [ "${CLIENT_MENU:-0}" = "1" ] && report_role="client"
@@ -1715,76 +1712,6 @@ join_mode() {
     echo "准备启动$(objective_label "$objective")优化。"
     auto_tune "$host" "$iperf_port" "$objective" "$target_retr" "$rounds" "$reverse" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive" "$allow_same_public"
   fi
-}
-
-server_menu() {
-  token_file="$STATE_DIR/agent-$AGENT_PORT.token"
-  url_file="$STATE_DIR/agent-$AGENT_PORT.url"
-  token="$(cat "$token_file" 2>/dev/null || true)"
-  peer_url="$(cat "$url_file" 2>/dev/null || true)"
-  while true; do
-    render_server_dashboard "$peer_url" "$token"
-    echo
-    printf "%s服务端菜单%s\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET"
-    print_rule
-    printf "  %s1%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s2%s 查看客户端上报/事件\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s3%s 运行服务端本机优化\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s4%s 重新显示客户端运行命令\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s5%s 停止会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
-    printf "  %s0%s 退出菜单但保留服务\n" "$COLOR_DIM" "$COLOR_RESET"
-    echo
-    if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
-      warn "当前环境没有可用交互输入，服务端继续保留运行。"
-      return 0
-    fi
-    ans="$PROMPT_REPLY"
-    case "$ans" in
-      1)
-        clear_screen
-        print_header "服务端状态"
-        status_full
-        pause_for_enter
-        ;;
-      2)
-        clear_screen
-        print_header "客户端上报/事件"
-        if [ -n "$token" ]; then
-          get_agent_json "http://127.0.0.1:$AGENT_PORT/events" "$token" || warn "读取事件失败。"
-        else
-          warn "未找到 token 文件。"
-        fi
-        pause_for_enter
-        ;;
-      3)
-        clear_screen
-        print_header "服务端本机优化"
-        if ! prompt_read "请输入测试对端 host/IP："; then pause_for_enter; continue; fi
-        host="$PROMPT_REPLY"
-        if ! prompt_read "方向：1 download / 2 upload："; then pause_for_enter; continue; fi
-        direction_ans="$PROMPT_REPLY"
-        case "$direction_ans" in 2) direction="upload"; reverse="0" ;; *) direction="download"; reverse="1" ;; esac
-        if ! prompt_read "目标：1 重传 / 2 吞吐 / 3 启动："; then pause_for_enter; continue; fi
-        obj="$PROMPT_REPLY"
-        case "$obj" in 2) objective="throughput" ;; 3) objective="startup" ;; *) objective="retrans" ;; esac
-        auto_tune "$host" "$IPERF_PORT" "$objective" 0 3 "$reverse" 0 0 100 "" 0.79 0 1
-        pause_for_enter
-        ;;
-      4)
-        clear_screen
-        print_header "客户端连接命令"
-        if [ -n "$peer_url" ] && [ -n "$token" ]; then
-          print_client_commands "$peer_url" "$token"
-        else
-          warn "未找到会话连接信息。"
-        fi
-        pause_for_enter
-        ;;
-      5) stop_agent; exit 0 ;;
-      0) return 0 ;;
-      *) warn "无效选择。"; pause_for_enter ;;
-    esac
-  done
 }
 
 run_client_optimization() {
@@ -1836,8 +1763,7 @@ client_menu() {
     printf "  %s2%s 查看本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
     printf "  %s3%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
     printf "  %s4%s 查看过程记录\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s5%s 高级：请求服务端优化\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s6%s 停止双方会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
+    printf "  %s5%s 停止双方会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
     printf "  %s0%s 退出客户端\n" "$COLOR_DIM" "$COLOR_RESET"
     echo
     if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
@@ -1850,30 +1776,7 @@ client_menu() {
       2) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
       3) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
       4) clear_screen; print_header "过程记录"; get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
-      5)
-        clear_screen
-        print_header "请求服务端优化"
-        warn "仅当服务端能直接访问测试地址时使用；普通 NAT/OpenWrt 客户端优先选择菜单 1。"
-        if ! prompt_read "请输入服务端可直接访问的测试地址："; then pause_for_enter; continue; fi
-        target_host="$PROMPT_REPLY"
-        if ! prompt_read "方向：1 下载 / 2 上传："; then pause_for_enter; continue; fi
-        direction_ans="$PROMPT_REPLY"
-        case "$direction_ans" in 2) direction="upload" ;; *) direction="download" ;; esac
-        if ! prompt_read "目标：1 重传优先 / 2 吞吐优先 / 3 快速起速："; then pause_for_enter; continue; fi
-        case "$PROMPT_REPLY" in 2) objective="throughput" ;; 3) objective="startup" ;; *) objective="retrans" ;; esac
-        data="{\"host\":\"$target_host\",\"port\":$iperf_port,\"direction\":\"$direction\",\"objective\":\"$objective\",\"target_retr\":0,\"rounds\":3,\"allow_same_public_ip\":true}"
-        response="$(post_json "$peer/optimize" "$token" "$data")" || { warn "请求服务端优化失败。"; pause_for_enter; continue; }
-        job_id="$(printf '%s\n' "$response" | sed -n 's/.*"job_id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-        if [ -z "$job_id" ]; then
-          warn "服务端未返回任务 ID。"
-          printf '%s\n' "$response"
-        else
-          info "服务端已接受优化任务：$job_id"
-          wait_agent_job "$peer" "$token" "$job_id" || warn "远程优化任务未成功完成。"
-        fi
-        pause_for_enter
-        ;;
-      6) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
+      5) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
       0) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac
@@ -1881,22 +1784,14 @@ client_menu() {
 }
 
 server_mode() {
-  trap 'stop_agent; exit 130' INT TERM
-  SERVER_MENU_AFTER_LISTEN=1
-  export SERVER_MENU_AFTER_LISTEN
+  trap 'exit 130' INT TERM
+  trap 'if [ "${DRY_RUN:-0}" != "1" ]; then stop_agent; fi' 0
+  SERVER_MONITOR_AFTER_LISTEN=1
+  export SERVER_MONITOR_AFTER_LISTEN
   listen_mode
-  unset SERVER_MENU_AFTER_LISTEN
+  unset SERVER_MONITOR_AFTER_LISTEN
   [ "${DRY_RUN:-0}" = "1" ] && return 0
-  if has_interactive_input; then
-    server_menu
-  else
-    token_file="$STATE_DIR/agent-$AGENT_PORT.token"
-    url_file="$STATE_DIR/agent-$AGENT_PORT.url"
-    token="$(cat "$token_file" 2>/dev/null || true)"
-    peer_url="$(cat "$url_file" 2>/dev/null || true)"
-    render_server_dashboard "$peer_url" "$token"
-    warn "当前环境没有可用交互输入，服务端已在后台保留运行。"
-  fi
+  server_monitor
 }
 
 client_mode() {

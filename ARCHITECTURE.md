@@ -8,7 +8,7 @@
 https://github.com/10000ge10000/TCP-optimization
 ```
 
-它面向公网 VPS 与 OpenWrt / Linux / macOS / Windows 客户端，通过临时 HTTP Agent 和 iperf3 测试结果完成双端状态交换、测速、参数推荐、自动调优和回滚。
+它面向公网 VPS 与 OpenWrt / Linux / macOS / Windows 客户端，通过只读服务端、临时 HTTP Agent 和 iperf3 测试结果完成状态交换、测速、客户端本机参数推荐、自动调优和回滚。
 
 核心体验：
 
@@ -17,11 +17,12 @@ https://github.com/10000ge10000/TCP-optimization
   -> 自动安装依赖
   -> 启动 Agent + iperf3
   -> 输出客户端命令
+  -> 进入只读监控
 客户端运行 client
   -> 自动安装依赖
   -> 上报状态
   -> 进入客户端菜单
-双方通过菜单进行测速、优化、查看过程和停止会话
+客户端通过菜单进行测速和本机优化，服务端仅展示状态和结果
 ```
 
 ## 2. 技术栈
@@ -39,7 +40,7 @@ https://github.com/10000ge10000/TCP-optimization
 
 - 系统识别：识别 OpenWrt、Debian/Ubuntu、RHEL 系、macOS。
 - 依赖安装：按包管理器自动安装 iperf3、curl、python3。
-- 服务端模式：启动 Agent、iperf3，输出客户端命令并进入服务端菜单。
+- 服务端模式：启动 Agent、iperf3，输出客户端命令并进入前台只读监控；不修改服务端 TCP 参数。
 - 客户端模式：探测并上报局域网 IPv4，进入客户端菜单。
 - 智能推荐：按 BDP、RTT、内存和目标生成 TCP 参数。
 - 自动优化：提供重传优先、吞吐优先、快速起速三种目标，按 iperf3 Retr / 吞吐结果迭代调整参数。
@@ -68,7 +69,8 @@ server
   -> write_agent_py
   -> start HTTP Agent
   -> print client commands
-  -> server_menu
+  -> server_monitor
+  -> display client reports and events
 ```
 
 客户端：
@@ -111,14 +113,9 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 | `GET` | `/state` | 获取原始 Agent 状态 |
 | `POST` | `/report` | 客户端上报状态或测速结果 |
 | `POST` | `/test` | 触发服务端 iperf3 测试 |
-| `POST` | `/optimize` | 创建后台优化任务并立即返回任务 ID |
-| `GET` | `/jobs/<id>` | 查询优化任务状态 |
-| `GET` | `/jobs/<id>/output` | 读取优化任务输出 |
-| `POST` | `/apply-profile` | 应用服务端预设 |
-| `POST` | `/apply-buffers` | 应用服务端 buffer 参数 |
 | `POST` | `/stop` | 停止服务端会话 |
 
-所有端点都必须通过请求头 `X-TCP-Tune-Token` 或 query token 校验。文档和日志不应泄露 token。优化任务串行执行，避免多个任务并发修改同一套 TCP 参数。
+所有端点都必须通过请求头 `X-TCP-Tune-Token` 或 query token 校验。文档和日志不应泄露 token。`/optimize`、`/apply-profile`、`/apply-buffers` 明确返回 `403 server is read-only`，防止客户端或外部请求修改服务端 TCP 参数。
 
 ## 6. 配置与状态
 
@@ -190,8 +187,9 @@ sh tcp-tune.sh --dry-run server --public-url http://1.2.3.4:39188
 
 - VPS 运行 `server --ttl 120`
 - OpenWrt 运行 `client`
-- 验证 `/status`、`/events`、`/test`、`/optimize`、`/stop`
-- 验证 Ctrl+C 或菜单停止后无 Agent/iperf3 残留
+- 验证 `/status`、`/events`、`/test`、`/report`、`/stop`
+- 验证服务端写入端点返回 `403`
+- 验证 Ctrl+C、客户端停止或 TTL 到期后无 Agent/iperf3 残留
 - 验证 `rollback` 恢复修改前 live sysctl 快照
 
 ## 10. 架构决策
