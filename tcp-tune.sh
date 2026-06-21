@@ -45,13 +45,13 @@ clear_screen() {
 }
 
 has_interactive_input() {
-  [ -r /dev/tty ] || [ -t 0 ]
+  [ -t 0 ] || { [ -e /dev/tty ] && (: < /dev/tty) 2>/dev/null; }
 }
 
 prompt_read() {
   prompt="$1"
   printf "%s" "$prompt"
-  if [ -r /dev/tty ]; then
+  if [ -e /dev/tty ] && (: < /dev/tty) 2>/dev/null; then
     IFS= read -r PROMPT_REPLY < /dev/tty || return 1
   else
     IFS= read -r PROMPT_REPLY || return 1
@@ -62,7 +62,7 @@ prompt_read() {
 pause_for_enter() {
   has_interactive_input || return 0
   printf "\n%s按回车返回菜单...%s" "$COLOR_DIM" "$COLOR_RESET"
-  if [ -r /dev/tty ]; then
+  if [ -e /dev/tty ] && (: < /dev/tty) 2>/dev/null; then
     IFS= read -r PROMPT_REPLY < /dev/tty || true
   else
     IFS= read -r PROMPT_REPLY || true
@@ -226,9 +226,6 @@ install_runtime_deps() {
     openwrt)
       ensure_dependency iperf3 iperf3 || true
       ensure_dependency curl curl || true
-      if ! have_cmd tc; then
-        warn "OpenWrt 缺少 tc。建议安装：opkg update && opkg install tc-full kmod-ifb kmod-sched-cake"
-      fi
       ;;
     macos)
       ensure_dependency iperf3 iperf3 || true
@@ -732,8 +729,12 @@ EOF
     echo "net.ipv4.tcp_autocorking = 1" >> "$SYSCTL_FILE"
   fi
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || die "sysctl 配置加载失败，备份目录：$backup_dir"
-  info "已即时保存并加载 buffer：rmem=$rmem_max wmem=$wmem_max notsent=$notsent_lowat limit_output=$limit_output"
-  info "备份目录：$backup_dir"
+  if [ "${TUNE_SIMPLE_OUTPUT:-0}" = "1" ]; then
+    info "参数已调整并即时保存（已创建回滚备份）。"
+  else
+    info "已即时保存并加载 buffer：rmem=$rmem_max wmem=$wmem_max notsent=$notsent_lowat limit_output=$limit_output"
+    info "备份目录：$backup_dir"
+  fi
 }
 
 apply_smart() {
@@ -840,6 +841,61 @@ public_ip() {
   fi
 }
 
+local_lan_ipv4() {
+  if have_cmd ip; then
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "src" && (i + 1) <= NF) {
+            print $(i + 1)
+            exit
+          }
+        }
+      }
+    ' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}'
+    return 0
+  fi
+  if have_cmd route && have_cmd ipconfig; then
+    interface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')"
+    if [ -n "$interface" ]; then
+      ipconfig getifaddr "$interface" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  hostname -I 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\./) {print $i; exit}}' || true
+}
+
+objective_label() {
+  case "$1" in
+    throughput) echo "吞吐优先" ;;
+    startup) echo "快速起速" ;;
+    *) echo "重传优先" ;;
+  esac
+}
+
+direction_label() {
+  [ "$1" = "1" ] && echo "下载（服务端 → 本机）" || echo "上传（本机 → 服务端）"
+}
+
+format_rate() {
+  awk -v bps="${1:-0}" 'BEGIN {
+    if (bps >= 1000000000) printf "%.2f Gbps\n", bps / 1000000000
+    else printf "%.1f Mbps\n", bps / 1000000
+  }'
+}
+
+format_count() {
+  awk -v value="${1:-0}" 'BEGIN {
+    text = sprintf("%.0f", value)
+    output = ""
+    while (length(text) > 3) {
+      output = "," substr(text, length(text) - 2) output
+      text = substr(text, 1, length(text) - 3)
+    }
+    print text output
+  }'
+}
+
 start_iperf_server() {
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法启动测试服务。"
   port="$1"
@@ -870,11 +926,20 @@ run_iperf_client() {
   port="$2"
   reverse="$3"
   seconds="$4"
+  bind_ip="${5:-}"
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法测试。"
   if [ "$reverse" = "1" ]; then
-    iperf3 -c "$host" -p "$port" -R -t "$seconds" -J
+    if [ -n "$bind_ip" ]; then
+      iperf3 -c "$host" -p "$port" -B "$bind_ip" -R -t "$seconds" -J
+    else
+      iperf3 -c "$host" -p "$port" -R -t "$seconds" -J
+    fi
   else
-    iperf3 -c "$host" -p "$port" -t "$seconds" -J
+    if [ -n "$bind_ip" ]; then
+      iperf3 -c "$host" -p "$port" -B "$bind_ip" -t "$seconds" -J
+    else
+      iperf3 -c "$host" -p "$port" -t "$seconds" -J
+    fi
   fi
 }
 
@@ -1021,26 +1086,75 @@ auto_tune() {
     die "对端地址 $host 与本机公网出口 $local_public_ip 相同，疑似 NAT hairpin/自测链路。请换用真实对端公网地址，或添加 --allow-same-public-ip 强制测试。"
   fi
 
+  bind_ip="$(local_lan_ipv4 || true)"
+  case "$host" in
+    127.*|localhost|"$bind_ip") bind_ip="" ;;
+  esac
+  mode_name="$(objective_label "$objective")"
+  transfer_name="$(direction_label "$reverse")"
+  display_local_ip="${bind_ip:-$(local_lan_ipv4 || true)}"
+  [ -n "$display_local_ip" ] || display_local_ip="未识别"
+  TUNE_SIMPLE_OUTPUT=1
+
+  clear_screen
+  print_header "开始优化 · $mode_name"
+  print_kv "测试方向" "$transfer_name"
+  print_kv "本机地址" "$display_local_ip"
+  print_kv "测速节点" "已连接的服务端"
+  print_kv "最大轮数" "$rounds"
+  echo
+  printf "%s说明：%s测速使用本机局域网地址作为源地址，远端连接地址不会显示在界面中。\n" "$COLOR_DIM" "$COLOR_RESET"
+
   i=1
+  previous_retr=""
+  final_retr="0"
+  final_bps="0"
   while [ "$i" -le "$rounds" ]; do
-    info "第 $i 轮测试：host=$host port=$port objective=$objective"
-    json="$(run_iperf_client "$host" "$port" "$reverse" 15 || true)"
+    echo
+    print_rule
+    printf "%s第 %s/%s 轮%s · 正在测试链路...\n" "$COLOR_BOLD$COLOR_CYAN" "$i" "$rounds" "$COLOR_RESET"
+    json="$(run_iperf_client "$host" "$port" "$reverse" 15 "$bind_ip" || true)"
     [ -n "$json" ] || die "iperf3 测试失败。"
     retr="$(printf '%s\n' "$json" | extract_retransmits)"
     bps="$(printf '%s\n' "$json" | extract_bps)"
     retr="${retr:-0}"
     bps="${bps:-0}"
-    info "本轮结果：Retr=$retr, bits_per_second=$bps"
+    final_retr="$retr"
+    final_bps="$bps"
+    readable_rate="$(format_rate "$bps")"
+    readable_retr="$(format_count "$retr")"
+    printf "  速度：%s%s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$readable_rate" "$COLOR_RESET"
+    if [ "$retr" -le "$target_retr" ]; then
+      printf "  重传：%s%s 次%s\n" "$COLOR_BOLD$COLOR_GREEN" "$readable_retr" "$COLOR_RESET"
+    else
+      printf "  重传：%s%s 次%s\n" "$COLOR_BOLD$COLOR_RED" "$readable_retr" "$COLOR_RESET"
+    fi
+    if [ -n "$previous_retr" ]; then
+      if [ "$retr" -lt "$previous_retr" ]; then
+        printf "  趋势：%s重传正在下降%s\n" "$COLOR_GREEN" "$COLOR_RESET"
+      elif [ "$retr" -gt "$previous_retr" ]; then
+        printf "  趋势：%s重传暂时上升，继续收敛%s\n" "$COLOR_YELLOW" "$COLOR_RESET"
+      else
+        printf "  趋势：重传保持不变\n"
+      fi
+    fi
 
     measured_mbps="$(awk -v bps="$bps" 'BEGIN {v=bps/1000000; if (v < 1) v=1; printf "%d\n", v}')"
     [ "$peer_mbps" = "0" ] && peer_mbps="$measured_mbps"
     [ "$local_mbps" = "0" ] && local_mbps="$peer_mbps"
 
     if [ "$objective" = "retrans" ] && [ "$retr" -le "$target_retr" ]; then
-      info "已达到重传目标：$retr <= $target_retr"
+      echo
+      printf "%s✓ 目标已达成：重传降至 %s 次。%s\n" "$COLOR_BOLD$COLOR_GREEN" "$readable_retr" "$COLOR_RESET"
+      printf "最终速度：%s；配置保持不变或已即时保存。\n" "$readable_rate"
       return 0
     fi
 
+    case "$objective" in
+      retrans) printf "  动作：重传仍高，降低缓冲压力并减少排队。\n" ;;
+      throughput) printf "  动作：在可接受重传范围内继续探索更高速度。\n" ;;
+      startup) printf "  动作：缩短初始排队，优先改善连接起速。\n" ;;
+    esac
     # shellcheck disable=SC2086
     set -- $(tune_step "$objective" "$retr" "$bps" "$target_retr" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive")
     apply_buffers "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
@@ -1053,7 +1167,6 @@ auto_tune() {
         if (v < 0.35) v = 0.35
         printf "%.3f\n", v
       }')"
-      info "下一轮重传收敛 ramp=$ramp_rate"
     elif [ "$objective" = "throughput" ]; then
       ramp_rate="$(awk -v r="$ramp_rate" -v retr="$retr" -v target="$target_retr" 'BEGIN {
         if (retr <= target) v = r * 1.08
@@ -1062,11 +1175,23 @@ auto_tune() {
         if (v < 0.45) v = 0.45
         printf "%.3f\n", v
       }')"
-      info "下一轮速率探索 ramp=$ramp_rate"
     fi
+    previous_retr="$retr"
     i=$((i + 1))
   done
-  warn "已达到最大轮数，停止自动优化。"
+  echo
+  print_rule
+  final_rate="$(format_rate "$final_bps")"
+  final_retr_text="$(format_count "$final_retr")"
+  if [ "$objective" = "retrans" ] && [ "$final_retr" -gt "$target_retr" ]; then
+    warn "已完成 $rounds 轮，重传尚未降至目标值。"
+    printf "最终结果：%s，重传 %s 次。建议检查链路质量后再试。\n" "$final_rate" "$final_retr_text"
+  elif [ "$final_retr" -gt "$target_retr" ]; then
+    warn "优化轮次已完成，但当前重传仍偏高。"
+    printf "最终结果：%s，重传 %s 次。参数已保存，建议结合实际体验决定是否保留。\n" "$final_rate" "$final_retr_text"
+  else
+    printf "%s✓ 优化完成。%s 最终速度 %s，重传 %s 次。\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET" "$final_rate" "$final_retr_text"
+  fi
 }
 
 random_token() {
@@ -1497,16 +1622,16 @@ render_server_dashboard() {
 
 render_client_dashboard() {
   peer_url="$1"
-  host="$2"
+  local_ip="$2"
   iperf_port="$3"
   clear_screen
-  print_header "$APP_NAME $APP_VERSION - 客户端会话"
-  print_kv "服务端" "$peer_url"
-  print_kv "iperf3 主机" "$host"
-  print_kv "iperf3 端口" "$iperf_port"
-  print_kv "本机系统" "${OS_NAME:-Unknown}"
+  print_header "$APP_NAME $APP_VERSION - 客户端"
+  print_kv "连接状态" "已连接"
+  print_kv "本机设备" "${OS_NAME:-Unknown} · ${local_ip:-未识别}"
+  print_kv "测速节点" "已连接的服务端"
+  print_kv "测试端口" "$iperf_port"
   echo
-  printf "%s当前会话已连接。%s 可直接选择测速、优化或查看服务端状态。\n" "$COLOR_GREEN" "$COLOR_RESET"
+  printf "%s当前会话已连接。%s 远端代理地址仅用于内部通讯，不作为本机 Host 展示。\n" "$COLOR_GREEN" "$COLOR_RESET"
 }
 
 print_client_commands() {
@@ -1574,18 +1699,20 @@ join_mode() {
   [ -n "$token" ] || die "缺少 --token"
   install_runtime_deps
   detect_os
+  client_lan_ip="$(local_lan_ipv4 || true)"
+  [ -n "$client_lan_ip" ] || client_lan_ip="unknown"
 
   report_role="join"
   [ "${CLIENT_MENU:-0}" = "1" ] && report_role="client"
-  report="{\"role\":\"$report_role\",\"os\":\"$OS_NAME\",\"family\":\"$OS_FAMILY\",\"time\":$(date +%s)}"
+  report="{\"role\":\"$report_role\",\"os\":\"$OS_NAME\",\"family\":\"$OS_FAMILY\",\"lan_ip\":\"$client_lan_ip\",\"time\":$(date +%s)}"
   post_json "$peer/report" "$token" "$report" >/dev/null || warn "无法向对端上报状态，但将继续本地测试。"
 
   host="$(printf '%s\n' "$peer" | sed 's#^http://##; s#^https://##; s#:.*##; s#/.*##')"
-  echo "已加入会话：$peer"
+  echo "已连接到服务端会话。"
   if [ "${CLIENT_MENU:-0}" = "1" ]; then
-    client_menu "$peer" "$token" "$host" "$iperf_port" "$allow_same_public"
+    client_menu "$peer" "$token" "$host" "$iperf_port" "$allow_same_public" "$client_lan_ip"
   else
-    echo "开始本端自动优化：objective=$objective target_retr=$target_retr rounds=$rounds"
+    echo "准备启动$(objective_label "$objective")优化。"
     auto_tune "$host" "$iperf_port" "$objective" "$target_retr" "$rounds" "$reverse" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive" "$allow_same_public"
   fi
 }
@@ -1660,24 +1787,57 @@ server_menu() {
   done
 }
 
+run_client_optimization() {
+  host="$1"
+  iperf_port="$2"
+  allow_same_public="$3"
+  clear_screen
+  print_header "选择优化目标"
+  printf "  %s1%s %s重传优先%s\n" "$COLOR_GREEN" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
+  printf "     尽量把重传降到 0，适合游戏、语音和远程桌面。\n\n"
+  printf "  %s2%s %s吞吐优先%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
+  printf "     优先提升稳定传输速率，适合下载、备份和大文件。\n\n"
+  printf "  %s3%s %s快速起速%s\n" "$COLOR_YELLOW" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
+  printf "     缩短连接初期提速时间，适合网页、短连接和小文件。\n"
+  echo
+  if ! prompt_read "请选择优化目标 [1-3]："; then return 1; fi
+  case "$PROMPT_REPLY" in
+    2) objective="throughput"; target_retr="10"; rounds="4" ;;
+    3) objective="startup"; target_retr="5"; rounds="3" ;;
+    *) objective="retrans"; target_retr="0"; rounds="5" ;;
+  esac
+
+  echo
+  printf "  %s1%s 下载：服务端 → 本机\n" "$COLOR_CYAN" "$COLOR_RESET"
+  printf "  %s2%s 上传：本机 → 服务端\n" "$COLOR_CYAN" "$COLOR_RESET"
+  if ! prompt_read "请选择测试方向 [1-2]："; then return 1; fi
+  case "$PROMPT_REPLY" in
+    2) reverse="0" ;;
+    *) reverse="1" ;;
+  esac
+
+  auto_tune "$host" "$iperf_port" "$objective" "$target_retr" "$rounds" "$reverse" 0 0 100 "" 0.79 0 "$allow_same_public"
+}
+
 client_menu() {
   peer="$1"
   token="$2"
   host="$3"
   iperf_port="$4"
   allow_same_public="$5"
+  client_lan_ip="$6"
   while true; do
-    render_client_dashboard "$peer" "$host" "$iperf_port"
+    render_client_dashboard "$peer" "$client_lan_ip" "$iperf_port"
     echo
     printf "%s客户端菜单%s\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET"
     print_rule
-    printf "  %s1%s 查看本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s2%s 下载方向优化（服务端 -> 本机）\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s3%s 上传方向优化（本机 -> 服务端）\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s4%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s5%s 查看服务端事件\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s6%s 请求服务端优化\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s7%s 通知服务端停止会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
+    printf "  %s1%s %s开始优化%s\n" "$COLOR_GREEN" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
+    printf "     选择重传优先、吞吐优先或快速起速。\n"
+    printf "  %s2%s 查看本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s3%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s4%s 查看过程记录\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s5%s 高级：请求服务端优化\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s6%s 停止双方会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
     printf "  %s0%s 退出客户端\n" "$COLOR_DIM" "$COLOR_RESET"
     echo
     if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
@@ -1686,50 +1846,23 @@ client_menu() {
     fi
     ans="$PROMPT_REPLY"
     case "$ans" in
-      1)
-        clear_screen
-        print_header "本机状态"
-        status_full
-        pause_for_enter
-        ;;
-      2)
-        clear_screen
-        print_header "下载方向优化"
-        auto_tune "$host" "$iperf_port" retrans 0 3 1 0 0 100 "" 0.79 0 "$allow_same_public"
-        pause_for_enter
-        ;;
-      3)
-        clear_screen
-        print_header "上传方向优化"
-        auto_tune "$host" "$iperf_port" retrans 0 3 0 0 0 100 "" 0.79 0 "$allow_same_public"
-        pause_for_enter
-        ;;
-      4)
-        clear_screen
-        print_header "服务端状态"
-        get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"
-        pause_for_enter
-        ;;
+      1) run_client_optimization "$host" "$iperf_port" "$allow_same_public"; pause_for_enter ;;
+      2) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
+      3) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
+      4) clear_screen; print_header "过程记录"; get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
       5)
         clear_screen
-        print_header "服务端事件"
-        get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。"
-        pause_for_enter
-        ;;
-      6)
-        clear_screen
         print_header "请求服务端优化"
-        if ! prompt_read "请输入服务端可连接的本机 host/IP："; then pause_for_enter; continue; fi
+        warn "仅当服务端能直接访问测试地址时使用；普通 NAT/OpenWrt 客户端优先选择菜单 1。"
+        if ! prompt_read "请输入服务端可直接访问的测试地址："; then pause_for_enter; continue; fi
         target_host="$PROMPT_REPLY"
-        if ! prompt_read "方向：1 download / 2 upload："; then pause_for_enter; continue; fi
+        if ! prompt_read "方向：1 下载 / 2 上传："; then pause_for_enter; continue; fi
         direction_ans="$PROMPT_REPLY"
         case "$direction_ans" in 2) direction="upload" ;; *) direction="download" ;; esac
-        data="{\"host\":\"$target_host\",\"port\":$iperf_port,\"direction\":\"$direction\",\"objective\":\"retrans\",\"target_retr\":0,\"rounds\":3,\"allow_same_public_ip\":true}"
-        response="$(post_json "$peer/optimize" "$token" "$data")" || {
-          warn "请求服务端优化失败。"
-          pause_for_enter
-          continue
-        }
+        if ! prompt_read "目标：1 重传优先 / 2 吞吐优先 / 3 快速起速："; then pause_for_enter; continue; fi
+        case "$PROMPT_REPLY" in 2) objective="throughput" ;; 3) objective="startup" ;; *) objective="retrans" ;; esac
+        data="{\"host\":\"$target_host\",\"port\":$iperf_port,\"direction\":\"$direction\",\"objective\":\"$objective\",\"target_retr\":0,\"rounds\":3,\"allow_same_public_ip\":true}"
+        response="$(post_json "$peer/optimize" "$token" "$data")" || { warn "请求服务端优化失败。"; pause_for_enter; continue; }
         job_id="$(printf '%s\n' "$response" | sed -n 's/.*"job_id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
         if [ -z "$job_id" ]; then
           warn "服务端未返回任务 ID。"
@@ -1740,7 +1873,7 @@ client_menu() {
         fi
         pause_for_enter
         ;;
-      7) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
+      6) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
       0) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac

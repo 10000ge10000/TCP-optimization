@@ -40,9 +40,10 @@ https://github.com/10000ge10000/TCP-optimization
 - 系统识别：识别 OpenWrt、Debian/Ubuntu、RHEL 系、macOS。
 - 依赖安装：按包管理器自动安装 iperf3、curl、python3。
 - 服务端模式：启动 Agent、iperf3，输出客户端命令并进入服务端菜单。
-- 客户端模式：上报状态，进入客户端菜单。
+- 客户端模式：探测并上报局域网 IPv4，进入客户端菜单。
 - 智能推荐：按 BDP、RTT、内存和目标生成 TCP 参数。
-- 自动优化：按 iperf3 Retr / 吞吐结果迭代调整参数。
+- 自动优化：提供重传优先、吞吐优先、快速起速三种目标，按 iperf3 Retr / 吞吐结果迭代调整参数。
+- 客户端展示：隐藏代理公网地址，展示本机 LAN 地址和语义化测速结果；原始 sysctl 参数降级为详细信息。
 - 备份回滚：每次写入前保存 live sysctl 快照。
 - 安全清理：停止本工具创建并记录 pid 的临时 Agent/iperf3。
 
@@ -50,8 +51,9 @@ https://github.com/10000ge10000/TCP-optimization
 
 - Windows 状态检测。
 - 自动尝试安装 iperf3。
-- 连接服务端 Agent，上报状态。
-- 提供 Windows 客户端菜单和 iperf3 测试。
+- 探测并上报 Windows 局域网 IPv4，iperf3 使用该地址作为源地址绑定。
+- 提供与 Shell 客户端一致的中文菜单和三种目标模式。
+- 语义化显示 Mbps/Gbps、重传趋势及快速起速模式的首秒速度。
 - 默认不修改 Windows TCP 栈。
 
 ## 4. 数据流
@@ -75,9 +77,12 @@ server
 client
   -> detect_os
   -> install_runtime_deps
+  -> detect local LAN IPv4
   -> POST /report
   -> client_menu
-  -> auto/test/status/events/stop
+  -> select objective + direction
+  -> iperf3 bind local LAN IPv4
+  -> auto/status/events/stop
 ```
 
 自动优化：

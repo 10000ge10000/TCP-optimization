@@ -71,18 +71,26 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 客户端菜单：
 
 ```text
-1. 查看本机状态
-2. 下载方向优化（服务端 -> 本机）
-3. 上传方向优化（本机 -> 服务端）
-4. 查看服务端状态
-5. 查看服务端事件
-6. 请求服务端优化
-7. 通知服务端停止会话并退出
+1. 开始优化
+   - 重传优先：尽量把重传降到 0
+   - 吞吐优先：提高稳定传输速率
+   - 快速起速：缩短连接初期提速时间
+2. 查看本机状态
+3. 查看服务端状态
+4. 查看过程记录
+5. 高级：请求服务端优化
+6. 停止双方会话并退出
 0. 退出客户端
 ```
 
-优化过程会显示每轮 iperf3 的方向、速率、Retr、写入的 `rmem/wmem`、`tcp_notsent_lowat`、`tcp_limit_output_bytes` 和下一轮调整信息。
+客户端首页显示本机系统和局域网 IPv4，例如 `OpenWrt · 10.10.10.253`。代理公网地址只用于内部连接，不再作为本机 Host 或 iperf3 主机展示。iperf3 会使用本机局域网地址作为源地址绑定；远端测速目标仍是已连接的服务端，不能把本机 LAN 地址误当成远端目标。
+
+优化过程使用面向用户的摘要：优化模式、测试方向、当前轮次、Mbps/Gbps、重传次数、变化趋势、当前调整动作和最终结论。`rmem/wmem`、`tcp_notsent_lowat`、`tcp_limit_output_bytes` 等原始参数不再占据主流程，但仍会写入配置并保留回滚备份。
+
+Windows PowerShell 客户端使用相同的中文菜单和三种模式，并额外显示快速起速模式的首秒速度。Windows 端默认只执行真实链路测试、目标判定和优化建议，不自动写 Windows TCP 栈；Linux/OpenWrt 客户端才会自动保存内核参数。
 跨端优化使用异步任务：Agent 会立即返回任务 ID，客户端持续轮询状态并在完成后显示优化输出，避免长时间 iperf3 测试被代理或反向代理中断 HTTP 连接。
+
+客户端交互稿：[Figma 设计](https://www.figma.com/design/kiyIiPBnkOSSrFqmnU0DJG)。
 
 ## 常用命令
 
