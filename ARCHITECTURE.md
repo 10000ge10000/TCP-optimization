@@ -106,12 +106,14 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 | `GET` | `/state` | 获取原始 Agent 状态 |
 | `POST` | `/report` | 客户端上报状态或测速结果 |
 | `POST` | `/test` | 触发服务端 iperf3 测试 |
-| `POST` | `/optimize` | 触发服务端本机自动优化 |
+| `POST` | `/optimize` | 创建后台优化任务并立即返回任务 ID |
+| `GET` | `/jobs/<id>` | 查询优化任务状态 |
+| `GET` | `/jobs/<id>/output` | 读取优化任务输出 |
 | `POST` | `/apply-profile` | 应用服务端预设 |
 | `POST` | `/apply-buffers` | 应用服务端 buffer 参数 |
 | `POST` | `/stop` | 停止服务端会话 |
 
-所有端点都必须通过请求头 `X-TCP-Tune-Token` 或 query token 校验。文档和日志不应泄露 token。
+所有端点都必须通过请求头 `X-TCP-Tune-Token` 或 query token 校验。文档和日志不应泄露 token。优化任务串行执行，避免多个任务并发修改同一套 TCP 参数。
 
 ## 6. 配置与状态
 
@@ -147,7 +149,7 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 - TTL 到期后 Agent 拒绝新操作。
 - 写入类操作只接受白名单 endpoint。
 - Python Agent 只执行固定脚本参数，不接受任意 shell 命令。
-- Ctrl+C、菜单停止和 `/stop` 会清理本工具创建的 pid。
+- Ctrl+C、菜单停止和 `/stop` 会清理本工具创建的 pid、token、连接 URL 和临时 Agent 脚本，并保留日志和参数备份。
 - 不停止没有 pid 记录的长期 iperf3，避免误杀用户自建服务。
 
 ## 8. OpenWrt 说明

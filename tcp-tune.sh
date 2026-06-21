@@ -1084,6 +1084,8 @@ write_agent_py() {
 import http.server
 import json
 import os
+import secrets
+import signal
 import subprocess
 import threading
 import time
@@ -1098,7 +1100,11 @@ STATE = {
     "started_at": STARTED,
     "peer_reports": [],
     "events": [],
+    "jobs": {},
 }
+OPTIMIZE_LOCK = threading.Lock()
+ACTIVE_PROCESSES = set()
+ACTIVE_PROCESSES_LOCK = threading.Lock()
 
 def check_token(handler):
     token = handler.headers.get("X-TCP-Tune-Token", "")
@@ -1113,15 +1119,52 @@ def write_json(handler, code, payload):
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+
+def write_text(handler, code, payload):
+    body = payload.encode("utf-8")
+    handler.send_response(code)
+    handler.send_header("Content-Type", "text/plain; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
 
 def run_cmd(args):
-    proc = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return {
-        "code": proc.returncode,
-        "stdout": proc.stdout[-4000:],
-        "stderr": proc.stderr[-4000:],
-    }
+    proc = subprocess.Popen(
+        args,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    with ACTIVE_PROCESSES_LOCK:
+        ACTIVE_PROCESSES.add(proc)
+    try:
+        stdout, stderr = proc.communicate()
+        return {
+            "code": proc.returncode,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
+        }
+    finally:
+        with ACTIVE_PROCESSES_LOCK:
+            ACTIVE_PROCESSES.discard(proc)
+
+def terminate_active_processes():
+    with ACTIVE_PROCESSES_LOCK:
+        processes = list(ACTIVE_PROCESSES)
+    for proc in processes:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
 def safe_int(value, default, min_value=None, max_value=None):
     try:
@@ -1137,6 +1180,29 @@ def safe_int(value, default, min_value=None, max_value=None):
 def safe_choice(value, allowed, default):
     value = str(value or default)
     return value if value in allowed else default
+
+def run_optimize_job(job_id, args):
+    job = STATE["jobs"][job_id]
+    with OPTIMIZE_LOCK:
+        job["status"] = "running"
+        job["started_at"] = time.time()
+        STATE["events"].append({"time": time.time(), "action": "optimize-running", "job_id": job_id})
+        try:
+            result = run_cmd(args)
+        except OSError as exc:
+            result = {"code": 127, "stdout": "", "stderr": f"启动优化进程失败：{exc}"}
+        job["result"] = result
+        job["status"] = "completed" if result["code"] == 0 else "failed"
+        job["finished_at"] = time.time()
+        STATE["events"].append({
+            "time": time.time(),
+            "action": "optimize-completed",
+            "job_id": job_id,
+            "host": job["host"],
+            "direction": job["direction"],
+            "objective": job["objective"],
+            "result": result["code"],
+        })
 
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "tcp-tune-agent/0.1"
@@ -1166,6 +1232,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/status":
             result = run_cmd([SCRIPT, "status"])
             write_json(self, 200, {"ok": result["code"] == 0, "result": result})
+            return
+        if path.startswith("/jobs/"):
+            parts = path.strip("/").split("/")
+            job_id = parts[1] if len(parts) >= 2 else ""
+            job = STATE["jobs"].get(job_id)
+            if not job:
+                write_json(self, 404, {"ok": False, "error": "job not found"})
+                return
+            if len(parts) == 3 and parts[2] == "output":
+                result = job.get("result", {})
+                output = result.get("stdout", "")
+                if result.get("stderr"):
+                    output += ("\n" if output else "") + result["stderr"]
+                write_text(self, 200, output or "任务尚未产生输出。\n")
+                return
+            if len(parts) == 2:
+                public_job = {key: value for key, value in job.items() if key != "result"}
+                if "result" in job:
+                    public_job["result_code"] = job["result"]["code"]
+                write_json(self, 200, {"ok": True, "job": public_job})
+                return
+            write_json(self, 404, {"ok": False, "error": "not found"})
             return
         write_json(self, 404, {"ok": False, "error": "not found"})
 
@@ -1221,14 +1309,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ]
             if payload.get("allow_same_public_ip"):
                 args.append("--allow-same-public-ip")
-            result = run_cmd(args)
-            STATE["events"].append({"time": time.time(), "action": "optimize", "host": host, "direction": direction, "objective": objective, "result": result["code"]})
-            write_json(self, 200, {"ok": result["code"] == 0, "result": result})
+            job_id = secrets.token_hex(8)
+            STATE["jobs"][job_id] = {
+                "id": job_id,
+                "status": "queued",
+                "created_at": time.time(),
+                "host": host,
+                "direction": direction,
+                "objective": objective,
+            }
+            STATE["events"].append({"time": time.time(), "action": "optimize-queued", "job_id": job_id, "host": host, "direction": direction, "objective": objective})
+            threading.Thread(target=run_optimize_job, args=(job_id, args), daemon=True).start()
+            write_json(self, 202, {"ok": True, "accepted": True, "job_id": job_id})
             return
         if path == "/stop":
             STATE["events"].append({"time": time.time(), "action": "stop-request"})
             write_json(self, 200, {"ok": True, "message": "agent stopping"})
             def stop_all():
+                terminate_active_processes()
                 subprocess.run([SCRIPT, "stop-agent"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 os._exit(0)
             threading.Timer(0.3, stop_all).start()
@@ -1319,6 +1417,10 @@ stop_agent() {
     fi
     rm -f "$pid_file"
   done
+  for session_file in "$STATE_DIR"/agent-*.token "$STATE_DIR"/agent-*.url "$STATE_DIR"/tcp-tune-agent.py; do
+    [ -f "$session_file" ] || continue
+    rm -f "$session_file"
+  done
   if [ "$stopped" = "0" ]; then
     info "未发现本工具记录的临时 Agent/iperf3 pid。"
   else
@@ -1337,6 +1439,43 @@ get_agent_json() {
   url="$1"
   token="$2"
   curl -fsS -H "X-TCP-Tune-Token: $token" "$url"
+}
+
+wait_agent_job() {
+  peer="$1"
+  token="$2"
+  job_id="$3"
+  waited=0
+  max_wait="${4:-900}"
+  while [ "$waited" -lt "$max_wait" ]; do
+    response="$(get_agent_json "$peer/jobs/$job_id" "$token")" || return 1
+    status="$(printf '%s\n' "$response" | sed -n 's/.*"status":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    case "$status" in
+      queued|running)
+        printf '\r远程优化任务：%-8s 已等待 %ss' "$status" "$waited"
+        sleep 2
+        waited=$((waited + 2))
+        ;;
+      completed)
+        printf '\r远程优化任务：completed                    \n'
+        get_agent_json "$peer/jobs/$job_id/output" "$token"
+        return 0
+        ;;
+      failed)
+        printf '\r远程优化任务：failed                       \n'
+        get_agent_json "$peer/jobs/$job_id/output" "$token" || true
+        return 1
+        ;;
+      *)
+        warn "无法识别远程任务状态。"
+        printf '%s\n' "$response"
+        return 1
+        ;;
+    esac
+  done
+  echo
+  warn "等待远程优化任务超时，可通过服务端事件继续查看。"
+  return 1
 }
 
 render_server_dashboard() {
@@ -1586,7 +1725,19 @@ client_menu() {
         direction_ans="$PROMPT_REPLY"
         case "$direction_ans" in 2) direction="upload" ;; *) direction="download" ;; esac
         data="{\"host\":\"$target_host\",\"port\":$iperf_port,\"direction\":\"$direction\",\"objective\":\"retrans\",\"target_retr\":0,\"rounds\":3,\"allow_same_public_ip\":true}"
-        post_json "$peer/optimize" "$token" "$data" || warn "请求服务端优化失败。"
+        response="$(post_json "$peer/optimize" "$token" "$data")" || {
+          warn "请求服务端优化失败。"
+          pause_for_enter
+          continue
+        }
+        job_id="$(printf '%s\n' "$response" | sed -n 's/.*"job_id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+        if [ -z "$job_id" ]; then
+          warn "服务端未返回任务 ID。"
+          printf '%s\n' "$response"
+        else
+          info "服务端已接受优化任务：$job_id"
+          wait_agent_job "$peer" "$token" "$job_id" || warn "远程优化任务未成功完成。"
+        fi
         pause_for_enter
         ;;
       7) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;

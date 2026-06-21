@@ -82,6 +82,7 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 ```
 
 优化过程会显示每轮 iperf3 的方向、速率、Retr、写入的 `rmem/wmem`、`tcp_notsent_lowat`、`tcp_limit_output_bytes` 和下一轮调整信息。
+跨端优化使用异步任务：Agent 会立即返回任务 ID，客户端持续轮询状态并在完成后显示优化输出，避免长时间 iperf3 测试被代理或反向代理中断 HTTP 连接。
 
 ## 常用命令
 
@@ -235,6 +236,7 @@ sudo sh tcp-tune.sh rollback
 - Agent 使用随机 token，所有写入类接口都必须校验 token。
 - token 不要发到公开群聊、日志或截图中。
 - `server/client` 在 Ctrl+C、菜单停止、远程 `/stop` 时会清理本工具创建的 Agent 和 iperf3。
+- 清理时会同步删除会话 token、连接 URL 和临时 Agent 脚本；测速日志和参数备份继续保留。
 - 工具只停止自己记录 pid 的临时进程，不会主动误杀用户已有的长期 iperf3 服务。
 - 默认 Agent 是 HTTP 明文，只建议用于临时可信调优会话。
 
