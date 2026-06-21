@@ -83,9 +83,11 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 
 客户端首页显示本机系统和局域网 IPv4，例如 `OpenWrt · 10.10.10.253`。代理公网地址只用于内部连接，不再作为本机 Host 或 iperf3 主机展示。iperf3 会使用本机局域网地址作为源地址绑定；远端测速目标仍是已连接的服务端，不能把本机 LAN 地址误当成远端目标。
 
-优化过程使用面向用户的摘要：优化模式、测试方向、当前轮次、Mbps/Gbps、重传次数、变化趋势、当前调整动作和最终结论。`rmem/wmem`、`tcp_notsent_lowat`、`tcp_limit_output_bytes` 等原始参数不再占据主流程，但仍会写入配置并保留回滚备份。
+优化过程使用面向用户的摘要：优化模式、测试方向、当前轮次、Mbps/Gbps、重传次数、变化趋势、快速起速的首秒速度、当前调整动作和最终结论。`rmem/wmem`、`tcp_notsent_lowat`、`tcp_limit_output_bytes` 等原始参数不再占据主流程，但仍会写入配置并保留回滚备份。
 
-Windows PowerShell 客户端使用相同的中文菜单和三种模式，并额外显示快速起速模式的首秒速度。Windows 端默认只执行真实链路测试、目标判定和优化建议，不自动写 Windows TCP 栈；Linux/OpenWrt 客户端才会自动保存内核参数。服务端始终保持只读，不接受参数写入。
+Windows PowerShell 客户端使用相同的中文菜单和三种模式。Windows 端默认只执行真实链路测试、目标判定和优化建议，不自动写 Windows TCP 栈；Linux/OpenWrt 客户端才会自动保存内核参数。服务端始终保持只读，不接受参数写入。
+
+自动优化只保留经过下一轮 iperf3 复测的参数。最后一轮不会再写入未经验证的新参数；如果重传、吞吐或首秒速度相对上一轮明显退化，脚本会自动撤销最新调整并保留上一轮更优配置。
 
 客户端与服务端交互稿：[Figma 设计](https://www.figma.com/design/kiyIiPBnkOSSrFqmnU0DJG)。
 
@@ -240,6 +242,7 @@ sudo sh tcp-tune.sh rollback
 - `server` 会临时打开 HTTP Agent 端口和 iperf3 端口。
 - Agent 使用随机 token，所有写入类接口都必须校验 token。
 - token 不要发到公开群聊、日志或截图中。
+- 交互终端会显示一次客户端连接命令；输出被重定向到日志时，token 会自动替换为隐藏占位符。
 - `server/client` 在 Ctrl+C、菜单停止、远程 `/stop` 时会清理本工具创建的 Agent 和 iperf3。
 - 清理时会同步删除会话 token、连接 URL 和临时 Agent 脚本；测速日志和参数备份继续保留。
 - 工具只停止自己记录 pid 的临时进程，不会主动误杀用户已有的长期 iperf3 服务。

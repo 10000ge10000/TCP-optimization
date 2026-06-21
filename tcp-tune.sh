@@ -190,6 +190,12 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+is_positive_number() {
+  awk -v value="$1" 'BEGIN {
+    exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 > 0)
+  }'
+}
+
 need_root() {
   if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
     die "此操作需要 root 权限。请使用 root 用户或 sudo 运行。"
@@ -284,6 +290,11 @@ ensure_dependency() {
   cmd="$1"
   pkg="$2"
   if have_cmd "$cmd"; then
+    return 0
+  fi
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    info "缺少 $cmd，预览通过 $PKG_MANAGER 安装 $pkg"
+    install_pkg "$pkg" || die "当前系统无法自动安装 $pkg。"
     return 0
   fi
   if [ "${ASSUME_YES:-0}" = "1" ]; then
@@ -468,6 +479,20 @@ recommend_values() {
   ramp_rate="${6:-0.79}"
   aggressive="${7:-0}"
 
+  for numeric_value in "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate"; do
+    if ! is_positive_number "$numeric_value"; then
+      echo "ERR invalid numeric input"
+      return 0
+    fi
+  done
+  case "$objective" in
+    retrans|throughput|startup) ;;
+    *)
+      echo "ERR invalid objective"
+      return 0
+      ;;
+  esac
+
   awk -v local="$local_mbps" -v peer="$peer_mbps" -v rtt="$rtt_ms" -v mem="$memory_mb_value" \
       -v objective="$objective" -v ramp="$ramp_rate" -v aggressive="$aggressive" '
     function clamp(v, min, max) {
@@ -481,7 +506,7 @@ recommend_values() {
     BEGIN {
       if (local <= 0 || peer <= 0 || rtt <= 0 || mem <= 0) {
         print "ERR invalid numeric input"
-        exit 2
+        exit
       }
 
       min_bw = local < peer ? local : peer
@@ -621,11 +646,22 @@ print_recommendation() {
   echo "  net.core.optmem_max = $optmem"
 }
 
+unique_path() {
+  base_path="$1"
+  candidate_path="$base_path"
+  suffix=1
+  while [ -e "$candidate_path" ]; do
+    candidate_path="${base_path}-$suffix"
+    suffix=$((suffix + 1))
+  done
+  printf '%s\n' "$candidate_path"
+}
+
 backup_state() {
   ensure_state_dir
   ts="$(date +%Y%m%d-%H%M%S)"
-  dir="$STATE_DIR/backups/$ts"
-  mkdir -p "$dir"
+  dir="$(unique_path "$STATE_DIR/backups/$ts")"
+  mkdir "$dir"
   if [ -f "$SYSCTL_FILE" ]; then
     cp "$SYSCTL_FILE" "$dir/99-tcp-tune.conf"
   fi
@@ -864,7 +900,8 @@ rollback_last() {
     sysctl --system >/dev/null 2>&1 || true
   fi
   mkdir -p "$STATE_DIR/rolled-back"
-  mv "$latest" "$STATE_DIR/rolled-back/$(basename "$latest")" 2>/dev/null || true
+  rollback_target="$(unique_path "$STATE_DIR/rolled-back/$(basename "$latest")")"
+  mv "$latest" "$rollback_target"
   info "已回滚到最近备份：$latest"
 }
 
@@ -1012,8 +1049,8 @@ progress_steps() {
 start_iperf_server() {
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法启动测试服务。"
   port="$1"
-  if pgrep -f "iperf3 .* -s .* -p $port" >/dev/null 2>&1; then
-    info "iperf3 server 已在端口 $port 运行。"
+  if pgrep -f "iperf3.*-s.*-p[[:space:]]+$port" >/dev/null 2>&1; then
+    info "检测到端口 $port 已有 iperf3 server，将复用且不会由本工具停止。"
     return 0
   fi
   nohup iperf3 -s -p "$port" > "$STATE_DIR/iperf3-$port.log" 2>&1 &
@@ -1029,8 +1066,7 @@ stop_iperf_server() {
     rm -f "$STATE_DIR/iperf3-$port.pid"
     info "已停止 iperf3 server：$pid"
   else
-    pkill -f "iperf3 .* -s .* -p $port" >/dev/null 2>&1 || true
-    info "已尝试停止端口 $port 的 iperf3 server。"
+    info "未找到本工具记录的 iperf3 pid，未停止端口 $port 上的其他进程。"
   fi
 }
 
@@ -1101,6 +1137,23 @@ extract_bps() {
       }
     }
     END { if (value != "") print value; }
+  '
+}
+
+extract_first_interval_bps() {
+  awk '
+    /"intervals"/ { in_intervals=1; next }
+    in_intervals && /"sum"[[:space:]]*:/ { in_sum=1; next }
+    in_sum && /"bits_per_second"/ {
+      gsub(/[,]/, "", $0)
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /"bits_per_second"/) {
+          gsub(/[^0-9.]/, "", $(i + 1))
+          print $(i + 1)
+          exit
+        }
+      }
+    }
   '
 }
 
@@ -1225,10 +1278,16 @@ auto_tune() {
   i=1
   previous_retr=""
   previous_bps=""
+  previous_startup_bps=""
   first_retr=""
   first_bps=""
+  first_startup_bps=""
   final_retr="0"
   final_bps="0"
+  final_startup_bps="0"
+  best_bps="0"
+  applied_change_count="0"
+  rolled_back_regression="0"
   completed_rounds="0"
   while [ "$i" -le "$rounds" ]; do
     echo
@@ -1239,13 +1298,20 @@ auto_tune() {
     [ -n "$json" ] || die "iperf3 测试失败。"
     retr="$(printf '%s\n' "$json" | extract_retransmits)"
     bps="$(printf '%s\n' "$json" | extract_bps)"
+    startup_bps="$(printf '%s\n' "$json" | extract_first_interval_bps)"
     retr="${retr:-0}"
     bps="${bps:-0}"
+    startup_bps="${startup_bps:-0}"
     final_retr="$retr"
     final_bps="$bps"
+    final_startup_bps="$startup_bps"
     completed_rounds="$i"
     [ -n "$first_retr" ] || first_retr="$retr"
     [ -n "$first_bps" ] || first_bps="$bps"
+    [ -n "$first_startup_bps" ] || first_startup_bps="$startup_bps"
+    if awk -v current="$bps" -v best="$best_bps" 'BEGIN { exit !(current > best) }'; then
+      best_bps="$bps"
+    fi
     readable_rate="$(format_rate "$bps")"
     readable_retr="$(format_count "$retr")"
     previous_rate="无"
@@ -1268,11 +1334,43 @@ auto_tune() {
     metric_line "当前重传" "$readable_retr 次（上轮 $previous_retr_text）" "$retr_state"
     metric_line "改善幅度" "$retr_delta · $trend" "$trend_state"
     metric_line "当前动作" "$action" "warn"
+    if [ "$objective" = "startup" ]; then
+      metric_line "首秒速度" "$(format_rate "$startup_bps")" "warn"
+    fi
     if [ -n "${TUNE_REPORT_PEER:-}" ] && [ -n "${TUNE_REPORT_TOKEN:-}" ]; then
       report_direction="download"
       [ "$reverse" = "0" ] && report_direction="upload"
-      report_data="{\"role\":\"client-result\",\"lan_ip\":\"${TUNE_CLIENT_IP:-$display_local_ip}\",\"round\":$i,\"rounds\":$rounds,\"objective\":\"$objective\",\"direction\":\"$report_direction\",\"retransmits\":$retr,\"bits_per_second\":$bps,\"time\":$(date +%s)}"
+      report_data="{\"role\":\"client-result\",\"lan_ip\":\"${TUNE_CLIENT_IP:-$display_local_ip}\",\"round\":$i,\"rounds\":$rounds,\"objective\":\"$objective\",\"direction\":\"$report_direction\",\"retransmits\":$retr,\"bits_per_second\":$bps,\"first_second_bits_per_second\":$startup_bps,\"time\":$(date +%s)}"
       post_json "$TUNE_REPORT_PEER/report" "$TUNE_REPORT_TOKEN" "$report_data" >/dev/null 2>&1 || true
+    fi
+
+    regressed="0"
+    if [ "$applied_change_count" -gt 0 ] && [ -n "$previous_retr" ]; then
+      case "$objective" in
+        retrans)
+          [ "$retr" -gt "$previous_retr" ] && regressed="1"
+          ;;
+        throughput)
+          if awk -v current="$bps" -v previous="$previous_bps" 'BEGIN { exit !(current < previous * 0.95) }'; then
+            regressed="1"
+          fi
+          ;;
+        startup)
+          if awk -v current="$startup_bps" -v previous="$previous_startup_bps" 'BEGIN { exit !(current < previous * 0.95) }'; then
+            regressed="1"
+          fi
+          ;;
+      esac
+    fi
+    if [ "$regressed" = "1" ]; then
+      warn "本轮表现较上轮退化，正在回滚最新参数调整。"
+      rollback_last
+      applied_change_count=$((applied_change_count - 1))
+      rolled_back_regression="1"
+      final_retr="$previous_retr"
+      final_bps="$previous_bps"
+      final_startup_bps="$previous_startup_bps"
+      break
     fi
 
     measured_mbps="$(awk -v bps="$bps" 'BEGIN {v=bps/1000000; if (v < 1) v=1; printf "%d\n", v}')"
@@ -1284,10 +1382,16 @@ auto_tune() {
       ui_note "结果" "目标已达成，进入结果页。"
       break
     fi
+    if [ "$i" -ge "$rounds" ]; then
+      echo
+      ui_note "结果" "已达到最大轮数，保留最后一次已验证参数。"
+      break
+    fi
 
     # shellcheck disable=SC2086
     set -- $(tune_step "$objective" "$retr" "$bps" "$target_retr" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive")
     apply_buffers "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+    applied_change_count=$((applied_change_count + 1))
     if [ "$objective" = "retrans" ] && [ "$retr" -gt "$target_retr" ]; then
       ramp_rate="$(awk -v r="$ramp_rate" -v retr="$retr" -v target="$target_retr" 'BEGIN {
         factor = 0.92
@@ -1308,6 +1412,7 @@ auto_tune() {
     fi
     previous_retr="$retr"
     previous_bps="$bps"
+    previous_startup_bps="$startup_bps"
     i=$((i + 1))
   done
   [ "$completed_rounds" = "0" ] && completed_rounds="$rounds"
@@ -1319,27 +1424,52 @@ auto_tune() {
   final_rate="$(format_rate "$final_bps")"
   final_retr_text="$(format_count "$final_retr")"
   first_rate="$(format_rate "${first_bps:-0}")"
+  first_startup_rate="$(format_rate "${first_startup_bps:-0}")"
+  final_startup_rate="$(format_rate "$final_startup_bps")"
+  best_rate="$(format_rate "$best_bps")"
   first_retr_text="$(format_count "${first_retr:-0}")"
   speed_delta="$(percent_delta "${first_bps:-0}" "$final_bps")"
   retr_delta="$(percent_delta "${first_retr:-0}" "$final_retr")"
-  if [ "$objective" = "retrans" ] && [ "$final_retr" -gt "$target_retr" ]; then
-    warn "已完成 $rounds 轮，重传尚未降至目标值。"
-    ui_row "结论" "重传尚未达到目标，建议检查链路质量后再试。"
-  elif [ "$final_retr" -gt "$target_retr" ]; then
-    warn "优化轮次已完成，但当前重传仍偏高。"
-    ui_row "结论" "参数已保存，但当前重传仍偏高。"
-  else
-    ui_row "结论" "目标已达成：当前配置已即时保存。"
-  fi
+  case "$objective" in
+    throughput)
+      ui_row "结论" "吞吐测试完成，最高速度 $best_rate，末轮重传 $final_retr_text 次。"
+      ;;
+    startup)
+      ui_row "结论" "起速测试完成，末轮首秒速度 $final_startup_rate。"
+      ;;
+    *)
+      if [ "$final_retr" -gt "$target_retr" ]; then
+        warn "已完成 $rounds 轮，重传尚未降至目标值。"
+        ui_row "结论" "重传尚未达到目标，建议检查链路质量后再试。"
+      else
+        ui_row "结论" "重传目标已达成，保持当前配置。"
+      fi
+      ;;
+  esac
   echo
   ui_section "优化前后"
   printf "  %-12s %-16s %-16s %-12s\n" "指标" "优化前" "优化后" "变化"
   printf "  %-12s %-16s %-16s %-12s\n" "传输速度" "$first_rate" "$final_rate" "$speed_delta"
   printf "  %-12s %-16s %-16s %-12s\n" "重传次数" "$first_retr_text" "$final_retr_text" "$retr_delta"
+  if [ "$objective" = "startup" ]; then
+    startup_delta="$(percent_delta "${first_startup_bps:-0}" "$final_startup_bps")"
+    printf "  %-12s %-16s %-16s %-12s\n" "首秒速度" "$first_startup_rate" "$final_startup_rate" "$startup_delta"
+  fi
   echo
   ui_section "配置摘要"
-  ui_note "已保存" "接收/发送缓冲和低排队参数已应用。"
-  ui_note "回滚" "已创建备份，可在客户端菜单或 rollback 命令中恢复。"
+  if [ "$rolled_back_regression" = "1" ] && [ "$applied_change_count" -eq 0 ]; then
+    ui_note "已回退" "最新调整表现退化，已恢复优化前配置。"
+    ui_note "回滚" "没有保留本次参数修改。"
+  elif [ "$rolled_back_regression" = "1" ]; then
+    ui_note "已回退" "已撤销最新退化调整，保留前一轮更优配置。"
+    ui_note "回滚" "保留的调整仍可通过 rollback 命令恢复。"
+  elif [ "$applied_change_count" -gt 0 ]; then
+    ui_note "已保存" "仅保留经过下一轮复测的参数调整。"
+    ui_note "回滚" "已创建备份，可在客户端菜单或 rollback 命令中恢复。"
+  else
+    ui_note "未修改" "本次只完成基线测试，没有保存未经复测的参数。"
+    ui_note "回滚" "本轮未创建新的参数修改。"
+  fi
   echo
   ui_section "下一步操作"
   printf "  %s[1]%s 返回客户端主页\n" "$COLOR_CYAN" "$COLOR_RESET"
@@ -1608,7 +1738,7 @@ stop_agent() {
   if [ "$stopped" = "0" ]; then
     info "未发现本工具记录的临时 Agent/iperf3 pid。"
   else
-    info "已停止本工具创建的临时 Agent 和 iperf3。"
+    info "已停止本工具记录的临时进程。"
   fi
 }
 
@@ -1786,16 +1916,25 @@ render_client_dashboard() {
 print_client_commands() {
   peer_url="$1"
   token="$2"
+  display_token="$token"
+  case "$display_token" in
+    \<*\>) ;;
+    *)
+      if [ ! -t 1 ]; then
+        display_token="<会话令牌已隐藏>"
+      fi
+      ;;
+  esac
   ui_section "客户端连接命令"
   printf "%sOpenWrt / Linux / macOS%s\n" "$COLOR_CYAN" "$COLOR_RESET"
-  echo "  curl -fsSL $RAW_BASE_URL/tcp-tune.sh | sh -s -- --yes client --peer $peer_url --token $token --iperf-port $IPERF_PORT"
+  echo "  curl -fsSL $RAW_BASE_URL/tcp-tune.sh | sh -s -- --yes client --peer $peer_url --token $display_token --iperf-port $IPERF_PORT"
   echo
   printf "%s已有脚本本地运行%s\n" "$COLOR_CYAN" "$COLOR_RESET"
-  echo "  sh tcp-tune.sh --yes client --peer $peer_url --token $token --iperf-port $IPERF_PORT"
+  echo "  sh tcp-tune.sh --yes client --peer $peer_url --token $display_token --iperf-port $IPERF_PORT"
   echo
   printf "%sWindows PowerShell%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   echo "  iwr -UseBasicParsing $RAW_BASE_URL/tcp-tune.ps1 -OutFile tcp-tune.ps1"
-  printf '  .\\tcp-tune.ps1 client -Peer %s -Token %s -IperfPort %s -Direction download -Yes\n' "$peer_url" "$token" "$IPERF_PORT"
+  printf '  .\\tcp-tune.ps1 client -Peer %s -Token %s -IperfPort %s -Direction download -Yes\n' "$peer_url" "$display_token" "$IPERF_PORT"
 }
 
 join_mode() {
