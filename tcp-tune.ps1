@@ -19,7 +19,7 @@ $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/10000ge10000/TCP-optimization"
 
 function Write-Rule {
-  Write-Host ("-" * 60) -ForegroundColor DarkGray
+  Write-Host ("-" * 60) -ForegroundColor Cyan
 }
 
 function Write-Header {
@@ -35,12 +35,12 @@ function Write-KeyValue {
 }
 
 function Write-PanelRule {
-  Write-Host "+----------------------------------------------------------+" -ForegroundColor DarkGray
+  Write-Host ("-" * 60) -ForegroundColor Cyan
 }
 
 function Write-PanelRow {
   param([string]$Label, [string]$Value)
-  Write-Host ("| {0,-12} {1,-43} |" -f $Label, $Value)
+  Write-Host ("  {0,-10} {1}" -f $Label, $Value)
 }
 
 function Write-Section {
@@ -51,7 +51,7 @@ function Write-Section {
 
 function Write-Note {
   param([string]$Label, [string]$Text)
-  Write-Host ("{0,-8} {1}" -f $Label, $Text) -ForegroundColor DarkGray
+  Write-Host ("  {0,-8} {1}" -f $Label, $Text) -ForegroundColor DarkGray
 }
 
 function Write-Subtitle {
@@ -253,7 +253,6 @@ function Show-ClientDashboard {
   Write-PanelRow "本机" "Windows · $LocalAddress"
   Write-PanelRow "测速节点" "已连接的服务端"
   Write-PanelRow "测试端口" "$Port"
-  Write-PanelRule
   Write-Host ""
   Write-Note "提示" "代理/公网地址仅用于脚本通讯，界面和测试源地址优先使用本机局域网 IP。"
   Write-Note "Windows" "默认只测速和给出建议，不自动修改 Windows TCP 栈。"
@@ -282,7 +281,6 @@ function Invoke-WindowsOptimization {
   Write-PanelRow "本机地址" $LocalAddress
   Write-PanelRow "测速节点" "已连接的服务端"
   Write-PanelRow "最大轮数" "$SelectedRounds"
-  Write-PanelRule
   Write-Host ""
   Write-Note "说明" "Windows 端进行真实链路测试并给出建议，不自动写系统 TCP 参数。"
 
@@ -358,7 +356,6 @@ function Invoke-WindowsOptimization {
   } else {
     Write-PanelRow "结论" ("目标已达成：重传降至 {0:N0} 次。" -f $lastMetrics.Retransmits)
   }
-  Write-PanelRule
   Write-Host ""
   Write-Section "优化前后"
   Write-Host ("  {0,-12} {1,-16} {2,-16} {3,-12}" -f "指标", "优化前", "优化后", "变化")
@@ -407,19 +404,25 @@ function Invoke-ClientMenu {
   while ($true) {
     Show-ClientDashboard -LocalAddress $LocalAddress -Port $Port
     Write-Host ""
-    Write-Section "选择操作"
+    Write-Section "操作菜单"
+    Write-Host "优化" -ForegroundColor Cyan
     Write-Host "  [1] " -NoNewline -ForegroundColor Green
-    Write-Host "开始优化" -ForegroundColor White
-    Write-Host "      选择重传、吞吐或快速起速" -ForegroundColor DarkGray
-    Write-Host "  [2] 查看本机状态"
-    Write-Host "      查看系统与 TCP 参数摘要" -ForegroundColor DarkGray
-    Write-Host "  [3] 查看服务端状态"
-    Write-Host "      检查会话与测速服务" -ForegroundColor DarkGray
-    Write-Host "  [4] 查看过程记录"
-    Write-Host "      查看最近任务与结果" -ForegroundColor DarkGray
-    Write-Host "  [5] 停止双方会话并退出" -ForegroundColor Yellow
-    Write-Host "  [0] 退出客户端" -ForegroundColor DarkGray
-    Write-Host "      不停止服务端会话" -ForegroundColor DarkGray
+    Write-Host "开始优化                 " -NoNewline
+    Write-Host "重传 / 吞吐 / 快速起速" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "状态" -ForegroundColor Cyan
+    Write-Host "  [2] 查看本机状态             " -NoNewline
+    Write-Host "系统 / TCP 参数" -ForegroundColor DarkGray
+    Write-Host "  [3] 查看服务端状态           " -NoNewline
+    Write-Host "会话 / 测速服务" -ForegroundColor DarkGray
+    Write-Host "  [4] 查看过程记录             " -NoNewline
+    Write-Host "任务 / 结果" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "退出" -ForegroundColor Cyan
+    Write-Host "  [5] 停止双方会话并退出       " -NoNewline -ForegroundColor Yellow
+    Write-Host "清理 Agent / iperf3" -ForegroundColor DarkGray
+    Write-Host "  [0] 退出客户端               " -NoNewline -ForegroundColor DarkGray
+    Write-Host "不停止服务端会话" -ForegroundColor DarkGray
     $choice = Read-Host "请选择"
     switch ($choice) {
       "1" { Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress; Read-Host "按回车返回菜单" | Out-Null }

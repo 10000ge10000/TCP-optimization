@@ -70,7 +70,7 @@ pause_for_enter() {
 }
 
 print_rule() {
-  printf "%s%s%s\n" "$COLOR_DIM" "------------------------------------------------------------" "$COLOR_RESET"
+  printf "%s%s%s\n" "$COLOR_CYAN" "------------------------------------------------------------" "$COLOR_RESET"
 }
 
 print_header() {
@@ -86,13 +86,13 @@ print_kv() {
 }
 
 ui_rule() {
-  printf "%s+----------------------------------------------------------+%s\n" "$COLOR_DIM" "$COLOR_RESET"
+  printf "%s%s%s\n" "$COLOR_CYAN" "------------------------------------------------------------" "$COLOR_RESET"
 }
 
 ui_row() {
   label="$1"
   value="$2"
-  printf "| %-12s %-43s |\n" "$label" "$value"
+  printf "  %s%-10s%s %s\n" "$COLOR_BOLD" "$label" "$COLOR_RESET" "$value"
 }
 
 ui_section() {
@@ -104,7 +104,7 @@ ui_section() {
 ui_note() {
   label="$1"
   text="$2"
-  printf "%s%-8s%s %s\n" "$COLOR_DIM" "$label" "$COLOR_RESET" "$text"
+  printf "  %s%-8s%s %s\n" "$COLOR_DIM" "$label" "$COLOR_RESET" "$text"
 }
 
 ui_subtitle() {
@@ -1219,7 +1219,6 @@ auto_tune() {
   ui_row "本机地址" "$display_local_ip"
   ui_row "测速节点" "已连接的服务端"
   ui_row "最大轮数" "$rounds"
-  ui_rule
   echo
   ui_note "说明" "测速使用本机局域网地址作为源地址，远端连接地址不会显示在界面中。"
 
@@ -1332,7 +1331,6 @@ auto_tune() {
   else
     ui_row "结论" "目标已达成：当前配置已即时保存。"
   fi
-  ui_rule
   echo
   ui_section "优化前后"
   printf "  %-12s %-16s %-16s %-12s\n" "指标" "优化前" "优化后" "变化"
@@ -1642,7 +1640,6 @@ render_server_dashboard() {
   ui_row "Agent 端口" "$AGENT_PORT"
   ui_row "测速端口" "$IPERF_PORT"
   ui_row "剩余时间" "$ttl_text"
-  ui_rule
   echo
   render_server_activity "$token"
   echo
@@ -1688,7 +1685,7 @@ for entry in reports:
         device["last"] = max(device["last"], entry.get("time", 0))
 
 print("已接入客户端")
-print("+----------------------------------------------------------+")
+print("------------------------------------------------------------")
 if not devices:
     print("  暂无客户端，等待连接...")
 else:
@@ -1698,7 +1695,7 @@ else:
 
 print()
 print("最近结果")
-print("+----------------------------------------------------------+")
+print("------------------------------------------------------------")
 if not results:
     print("  尚未收到测速结果。")
 else:
@@ -1715,7 +1712,7 @@ else:
 
 print()
 print("最近事件")
-print("+----------------------------------------------------------+")
+print("------------------------------------------------------------")
 events = state.get("events", [])[-5:]
 if not events:
     print("  服务端已启动，等待客户端上报。")
@@ -1782,7 +1779,6 @@ render_client_dashboard() {
   ui_row "本机" "${OS_NAME:-Unknown} · ${local_ip:-未识别}"
   ui_row "测速节点" "已连接的服务端"
   ui_row "测试端口" "$iperf_port"
-  ui_rule
   echo
   ui_note "提示" "代理/公网地址仅用于脚本通讯，界面和测试源地址优先使用本机局域网 IP。"
 }
@@ -1790,15 +1786,14 @@ render_client_dashboard() {
 print_client_commands() {
   peer_url="$1"
   token="$2"
-  printf "%s客户端连接命令%s\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET"
-  print_rule
-  printf "%sOpenWrt / Linux / macOS 一键运行：%s\n" "$COLOR_CYAN" "$COLOR_RESET"
+  ui_section "客户端连接命令"
+  printf "%sOpenWrt / Linux / macOS%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   echo "  curl -fsSL $RAW_BASE_URL/tcp-tune.sh | sh -s -- --yes client --peer $peer_url --token $token --iperf-port $IPERF_PORT"
   echo
-  printf "%s已有脚本本地运行：%s\n" "$COLOR_CYAN" "$COLOR_RESET"
+  printf "%s已有脚本本地运行%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   echo "  sh tcp-tune.sh --yes client --peer $peer_url --token $token --iperf-port $IPERF_PORT"
   echo
-  printf "%sWindows PowerShell：%s\n" "$COLOR_CYAN" "$COLOR_RESET"
+  printf "%sWindows PowerShell%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   echo "  iwr -UseBasicParsing $RAW_BASE_URL/tcp-tune.ps1 -OutFile tcp-tune.ps1"
   printf '  .\\tcp-tune.ps1 client -Peer %s -Token %s -IperfPort %s -Direction download -Yes\n' "$peer_url" "$token" "$IPERF_PORT"
 }
@@ -1918,18 +1913,18 @@ client_menu() {
   while true; do
     render_client_dashboard "$peer" "$client_lan_ip" "$iperf_port"
     echo
-    ui_section "选择操作"
-    printf "  %s[1]%s %s开始优化%s\n" "$COLOR_GREEN" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
-    printf "      %s选择重传、吞吐或快速起速%s\n" "$COLOR_DIM" "$COLOR_RESET"
-    printf "  %s[2]%s 查看本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "      %s查看系统与 TCP 参数摘要%s\n" "$COLOR_DIM" "$COLOR_RESET"
-    printf "  %s[3]%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "      %s检查会话与测速服务%s\n" "$COLOR_DIM" "$COLOR_RESET"
-    printf "  %s[4]%s 查看过程记录\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "      %s查看最近任务与结果%s\n" "$COLOR_DIM" "$COLOR_RESET"
-    printf "  %s[5]%s 停止双方会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
-    printf "  %s[0]%s 退出客户端\n" "$COLOR_DIM" "$COLOR_RESET"
-    printf "      %s不停止服务端会话%s\n" "$COLOR_DIM" "$COLOR_RESET"
+    ui_section "操作菜单"
+    printf "%s优化%s\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s[1]%s 开始优化                 %s重传 / 吞吐 / 快速起速%s\n" "$COLOR_GREEN" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
+    echo
+    printf "%s状态%s\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s[2]%s 查看本机状态             %s系统 / TCP 参数%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
+    printf "  %s[3]%s 查看服务端状态           %s会话 / 测速服务%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
+    printf "  %s[4]%s 查看过程记录             %s任务 / 结果%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
+    echo
+    printf "%s退出%s\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "  %s[5]%s 停止双方会话并退出       %s清理 Agent / iperf3%s\n" "$COLOR_YELLOW" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
+    printf "  %s[0]%s 退出客户端               %s不停止服务端会话%s\n" "$COLOR_DIM" "$COLOR_RESET" "$COLOR_DIM" "$COLOR_RESET"
     echo
     if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
       warn "当前环境没有可用交互输入，客户端已保持连接上报后退出菜单。"
