@@ -85,6 +85,94 @@ print_kv() {
   printf "  %s%-14s%s %s\n" "$COLOR_BLUE" "$label" "$COLOR_RESET" "$value"
 }
 
+ui_rule() {
+  printf "%s+----------------------------------------------------------+%s\n" "$COLOR_DIM" "$COLOR_RESET"
+}
+
+ui_row() {
+  label="$1"
+  value="$2"
+  printf "| %-12s %-43s |\n" "$label" "$value"
+}
+
+ui_section() {
+  title="$1"
+  printf "%s%s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$title" "$COLOR_RESET"
+  ui_rule
+}
+
+ui_note() {
+  label="$1"
+  text="$2"
+  printf "%s%-8s%s %s\n" "$COLOR_DIM" "$label" "$COLOR_RESET" "$text"
+}
+
+ui_subtitle() {
+  text="$1"
+  printf "%s%s%s\n" "$COLOR_DIM" "$text" "$COLOR_RESET"
+}
+
+ui_mode_card() {
+  number="$1"
+  title="$2"
+  desc="$3"
+  target="$4"
+  printf "  %s[%s]%s %s%-10s%s %s\n" "$COLOR_CYAN" "$number" "$COLOR_RESET" "$COLOR_BOLD" "$title" "$COLOR_RESET" "$desc"
+  printf "      %s目标：%s%s\n" "$COLOR_DIM" "$target" "$COLOR_RESET"
+}
+
+metric_line() {
+  label="$1"
+  value="$2"
+  state="${3:-}"
+  case "$state" in
+    good) color="$COLOR_GREEN" ;;
+    warn) color="$COLOR_YELLOW" ;;
+    bad) color="$COLOR_RED" ;;
+    *) color="$COLOR_CYAN" ;;
+  esac
+  printf "  %-8s %s%s%s\n" "$label" "$color" "$value" "$COLOR_RESET"
+}
+
+trend_label() {
+  current="$1"
+  previous="$2"
+  if [ -z "$previous" ]; then
+    echo "建立基线"
+  elif [ "$current" -lt "$previous" ]; then
+    echo "重传下降"
+  elif [ "$current" -gt "$previous" ]; then
+    echo "重传上升"
+  else
+    echo "保持稳定"
+  fi
+}
+
+next_action_label() {
+  objective="$1"
+  retr="$2"
+  target_retr="$3"
+  case "$objective" in
+    throughput)
+      if [ "$retr" -le "$target_retr" ]; then
+        echo "重传可接受，继续尝试提高吞吐。"
+      else
+        echo "重传偏高，先收缩缓冲再测试。"
+      fi
+      ;;
+    startup)
+      echo "降低初始排队，优先改善短连接起速。"
+      ;;
+    *)
+      if [ "$retr" -le "$target_retr" ]; then
+        echo "已达到目标，保持当前参数。"
+      else
+        echo "降低排队和发送缓冲，继续压低重传。"
+      fi
+      ;;
+  esac
+}
+
 die() {
   printf "%s错误：%s%s\n" "$COLOR_RED" "$*" "$COLOR_RESET" >&2
   exit 1
@@ -896,6 +984,31 @@ format_count() {
   }'
 }
 
+percent_delta() {
+  before="$1"
+  after="$2"
+  awk -v before="$before" -v after="$after" 'BEGIN {
+    if (before <= 0) {
+      print "建立基线"
+      exit
+    }
+    delta = (after - before) * 100 / before
+    if (delta > 0) printf "+%.0f%%\n", delta
+    else printf "%.0f%%\n", delta
+  }'
+}
+
+progress_steps() {
+  round="$1"
+  rounds="$2"
+  printf "  %s连接测试%s -> %s分析结果%s -> %s应用调整%s -> %s复测确认%s\n" \
+    "$COLOR_GREEN" "$COLOR_RESET" \
+    "$COLOR_GREEN" "$COLOR_RESET" \
+    "$COLOR_CYAN" "$COLOR_RESET" \
+    "$COLOR_DIM" "$COLOR_RESET"
+  printf "  轮次 %s/%s\n" "$round" "$rounds"
+}
+
 start_iperf_server() {
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法启动测试服务。"
   port="$1"
@@ -1097,22 +1210,31 @@ auto_tune() {
   TUNE_SIMPLE_OUTPUT=1
 
   clear_screen
-  print_header "开始优化 · $mode_name"
-  print_kv "测试方向" "$transfer_name"
-  print_kv "本机地址" "$display_local_ip"
-  print_kv "测速节点" "已连接的服务端"
-  print_kv "最大轮数" "$rounds"
+  print_header "正在优化 · $mode_name"
+  ui_subtitle "$transfer_name · 本机 $display_local_ip · 第 1/$rounds 轮"
   echo
-  printf "%s说明：%s测速使用本机局域网地址作为源地址，远端连接地址不会显示在界面中。\n" "$COLOR_DIM" "$COLOR_RESET"
+  ui_section "优化概览"
+  ui_row "模式" "$mode_name"
+  ui_row "方向" "$transfer_name"
+  ui_row "本机地址" "$display_local_ip"
+  ui_row "测速节点" "已连接的服务端"
+  ui_row "最大轮数" "$rounds"
+  ui_rule
+  echo
+  ui_note "说明" "测速使用本机局域网地址作为源地址，远端连接地址不会显示在界面中。"
 
   i=1
   previous_retr=""
+  previous_bps=""
+  first_retr=""
+  first_bps=""
   final_retr="0"
   final_bps="0"
   while [ "$i" -le "$rounds" ]; do
     echo
-    print_rule
-    printf "%s第 %s/%s 轮%s · 正在测试链路...\n" "$COLOR_BOLD$COLOR_CYAN" "$i" "$rounds" "$COLOR_RESET"
+    ui_section "第 $i/$rounds 轮测试"
+    progress_steps "$i" "$rounds"
+    ui_note "状态" "正在用 iperf3 测试真实链路..."
     json="$(run_iperf_client "$host" "$port" "$reverse" 15 "$bind_ip" || true)"
     [ -n "$json" ] || die "iperf3 测试失败。"
     retr="$(printf '%s\n' "$json" | extract_retransmits)"
@@ -1121,23 +1243,30 @@ auto_tune() {
     bps="${bps:-0}"
     final_retr="$retr"
     final_bps="$bps"
+    [ -n "$first_retr" ] || first_retr="$retr"
+    [ -n "$first_bps" ] || first_bps="$bps"
     readable_rate="$(format_rate "$bps")"
     readable_retr="$(format_count "$retr")"
-    printf "  速度：%s%s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$readable_rate" "$COLOR_RESET"
+    previous_rate="无"
+    [ -n "$previous_bps" ] && previous_rate="$(format_rate "$previous_bps")"
+    previous_retr_text="无"
+    [ -n "$previous_retr" ] && previous_retr_text="$(format_count "$previous_retr") 次"
+    retr_delta="$(percent_delta "$first_retr" "$retr")"
     if [ "$retr" -le "$target_retr" ]; then
-      printf "  重传：%s%s 次%s\n" "$COLOR_BOLD$COLOR_GREEN" "$readable_retr" "$COLOR_RESET"
+      retr_state="good"
     else
-      printf "  重传：%s%s 次%s\n" "$COLOR_BOLD$COLOR_RED" "$readable_retr" "$COLOR_RESET"
+      retr_state="bad"
     fi
-    if [ -n "$previous_retr" ]; then
-      if [ "$retr" -lt "$previous_retr" ]; then
-        printf "  趋势：%s重传正在下降%s\n" "$COLOR_GREEN" "$COLOR_RESET"
-      elif [ "$retr" -gt "$previous_retr" ]; then
-        printf "  趋势：%s重传暂时上升，继续收敛%s\n" "$COLOR_YELLOW" "$COLOR_RESET"
-      else
-        printf "  趋势：重传保持不变\n"
-      fi
-    fi
+    trend="$(trend_label "$retr" "$previous_retr")"
+    action="$(next_action_label "$objective" "$retr" "$target_retr")"
+    case "$trend" in
+      重传下降|建立基线|保持稳定) trend_state="good" ;;
+      *) trend_state="warn" ;;
+    esac
+    metric_line "当前速度" "$readable_rate（上轮 $previous_rate）" "info"
+    metric_line "当前重传" "$readable_retr 次（上轮 $previous_retr_text）" "$retr_state"
+    metric_line "改善幅度" "$retr_delta · $trend" "$trend_state"
+    metric_line "当前动作" "$action" "warn"
     if [ -n "${TUNE_REPORT_PEER:-}" ] && [ -n "${TUNE_REPORT_TOKEN:-}" ]; then
       report_direction="download"
       [ "$reverse" = "0" ] && report_direction="upload"
@@ -1151,16 +1280,10 @@ auto_tune() {
 
     if [ "$objective" = "retrans" ] && [ "$retr" -le "$target_retr" ]; then
       echo
-      printf "%s✓ 目标已达成：重传降至 %s 次。%s\n" "$COLOR_BOLD$COLOR_GREEN" "$readable_retr" "$COLOR_RESET"
-      printf "最终速度：%s；配置保持不变或已即时保存。\n" "$readable_rate"
-      return 0
+      ui_note "结果" "目标已达成，进入结果页。"
+      break
     fi
 
-    case "$objective" in
-      retrans) printf "  动作：重传仍高，降低缓冲压力并减少排队。\n" ;;
-      throughput) printf "  动作：在可接受重传范围内继续探索更高速度。\n" ;;
-      startup) printf "  动作：缩短初始排队，优先改善连接起速。\n" ;;
-    esac
     # shellcheck disable=SC2086
     set -- $(tune_step "$objective" "$retr" "$bps" "$target_retr" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive")
     apply_buffers "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
@@ -1183,21 +1306,42 @@ auto_tune() {
       }')"
     fi
     previous_retr="$retr"
+    previous_bps="$bps"
     i=$((i + 1))
   done
   echo
-  print_rule
+  ui_section "优化完成"
   final_rate="$(format_rate "$final_bps")"
   final_retr_text="$(format_count "$final_retr")"
+  first_rate="$(format_rate "${first_bps:-0}")"
+  first_retr_text="$(format_count "${first_retr:-0}")"
+  speed_delta="$(percent_delta "${first_bps:-0}" "$final_bps")"
+  retr_delta="$(percent_delta "${first_retr:-0}" "$final_retr")"
   if [ "$objective" = "retrans" ] && [ "$final_retr" -gt "$target_retr" ]; then
     warn "已完成 $rounds 轮，重传尚未降至目标值。"
-    printf "最终结果：%s，重传 %s 次。建议检查链路质量后再试。\n" "$final_rate" "$final_retr_text"
+    ui_row "结论" "重传尚未达到目标，建议检查链路质量后再试。"
   elif [ "$final_retr" -gt "$target_retr" ]; then
     warn "优化轮次已完成，但当前重传仍偏高。"
-    printf "最终结果：%s，重传 %s 次。参数已保存，建议结合实际体验决定是否保留。\n" "$final_rate" "$final_retr_text"
+    ui_row "结论" "参数已保存，但当前重传仍偏高。"
   else
-    printf "%s✓ 优化完成。%s 最终速度 %s，重传 %s 次。\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET" "$final_rate" "$final_retr_text"
+    ui_row "结论" "目标已达成：当前配置已即时保存。"
   fi
+  ui_rule
+  echo
+  ui_section "优化前后"
+  printf "  %-12s %-16s %-16s %-12s\n" "指标" "优化前" "优化后" "变化"
+  printf "  %-12s %-16s %-16s %-12s\n" "传输速度" "$first_rate" "$final_rate" "$speed_delta"
+  printf "  %-12s %-16s %-16s %-12s\n" "重传次数" "$first_retr_text" "$final_retr_text" "$retr_delta"
+  echo
+  ui_section "配置摘要"
+  ui_note "已保存" "接收/发送缓冲和低排队参数已应用。"
+  ui_note "回滚" "已创建备份，可在客户端菜单或 rollback 命令中恢复。"
+  echo
+  ui_section "下一步操作"
+  printf "  %s[1]%s 返回客户端主页\n" "$COLOR_CYAN" "$COLOR_RESET"
+  printf "  %s[2]%s 换一种模式继续优化\n" "$COLOR_CYAN" "$COLOR_RESET"
+  printf "  %s[3]%s 查看详细参数\n" "$COLOR_CYAN" "$COLOR_RESET"
+  printf "  %s[4]%s 回滚本次修改\n" "$COLOR_CYAN" "$COLOR_RESET"
 }
 
 random_token() {
@@ -1483,19 +1627,24 @@ render_server_dashboard() {
   remaining="${3:-$SESSION_TTL}"
   ttl_text="$((remaining / 60))m $((remaining % 60))s"
   clear_screen
-  print_header "$APP_NAME $APP_VERSION - 服务端只读监控"
-  print_kv "运行状态" "服务运行中"
-  print_kv "运行模式" "只读监控"
-  print_kv "Agent 端口" "$AGENT_PORT"
-  print_kv "测速端口" "$IPERF_PORT"
-  print_kv "剩余时间" "$ttl_text"
+  print_header "TCP 双端调优器 · 服务端监控"
+  ui_subtitle "服务端只负责接收客户端、展示过程和提供临时测速服务"
   echo
-  print_client_commands "$peer_url" "$token"
+  ui_section "会话状态"
+  ui_row "运行状态" "服务运行中"
+  ui_row "运行模式" "只读监控"
+  ui_row "Agent 端口" "$AGENT_PORT"
+  ui_row "测速端口" "$IPERF_PORT"
+  ui_row "剩余时间" "$ttl_text"
+  ui_rule
   echo
   render_server_activity "$token"
   echo
-  printf "%s只读说明：%s服务端不修改 TCP 参数，所有优化由客户端在本机执行。\n" "$COLOR_GREEN" "$COLOR_RESET"
-  printf "%s安全提示：%s保持此窗口运行；按 Ctrl+C 会停止 Agent/iperf3 并清理会话凭据。\n" "$COLOR_YELLOW" "$COLOR_RESET"
+  print_client_commands "$peer_url" "$token"
+  echo
+  ui_section "安全说明"
+  ui_note "只读" "服务端不修改 TCP 参数，所有优化由客户端在本机执行。"
+  ui_note "清理" "保持此窗口运行；按 Ctrl+C 会停止 Agent/iperf3 并清理凭据。"
 }
 
 render_server_activity() {
@@ -1533,7 +1682,7 @@ for entry in reports:
         device["last"] = max(device["last"], entry.get("time", 0))
 
 print("已接入客户端")
-print("------------------------------------------------------------")
+print("+----------------------------------------------------------+")
 if not devices:
     print("  暂无客户端，等待连接...")
 else:
@@ -1543,7 +1692,7 @@ else:
 
 print()
 print("最近结果")
-print("------------------------------------------------------------")
+print("+----------------------------------------------------------+")
 if not results:
     print("  尚未收到测速结果。")
 else:
@@ -1560,7 +1709,7 @@ else:
 
 print()
 print("最近事件")
-print("------------------------------------------------------------")
+print("+----------------------------------------------------------+")
 events = state.get("events", [])[-5:]
 if not events:
     print("  服务端已启动，等待客户端上报。")
@@ -1619,13 +1768,17 @@ render_client_dashboard() {
   local_ip="$2"
   iperf_port="$3"
   clear_screen
-  print_header "$APP_NAME $APP_VERSION - 客户端"
-  print_kv "连接状态" "已连接"
-  print_kv "本机设备" "${OS_NAME:-Unknown} · ${local_ip:-未识别}"
-  print_kv "测速节点" "已连接的服务端"
-  print_kv "测试端口" "$iperf_port"
+  print_header "TCP 双端调优器 · 客户端"
+  ui_subtitle "${OS_NAME:-本机} 设备已连接，可直接选择优化目标"
   echo
-  printf "%s当前会话已连接。%s 远端代理地址仅用于内部通讯，不作为本机 Host 展示。\n" "$COLOR_GREEN" "$COLOR_RESET"
+  ui_section "连接状态"
+  ui_row "会话" "已连接"
+  ui_row "本机" "${OS_NAME:-Unknown} · ${local_ip:-未识别}"
+  ui_row "测速节点" "已连接的服务端"
+  ui_row "测试端口" "$iperf_port"
+  ui_rule
+  echo
+  ui_note "提示" "代理/公网地址仅用于脚本通讯，界面和测试源地址优先使用本机局域网 IP。"
 }
 
 print_client_commands() {
@@ -1720,12 +1873,12 @@ run_client_optimization() {
   allow_same_public="$3"
   clear_screen
   print_header "选择优化目标"
-  printf "  %s1%s %s重传优先%s\n" "$COLOR_GREEN" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
-  printf "     尽量把重传降到 0，适合游戏、语音和远程桌面。\n\n"
-  printf "  %s2%s %s吞吐优先%s\n" "$COLOR_CYAN" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
-  printf "     优先提升稳定传输速率，适合下载、备份和大文件。\n\n"
-  printf "  %s3%s %s快速起速%s\n" "$COLOR_YELLOW" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
-  printf "     缩短连接初期提速时间，适合网页、短连接和小文件。\n"
+  ui_subtitle "先选目标，再选测试方向。所有修改都可以回滚。"
+  echo
+  ui_section "优化模式"
+  ui_mode_card "1" "重传优先" "适合游戏、语音、远程桌面。" "尽量把重传降到 0"
+  ui_mode_card "2" "吞吐优先" "适合下载、备份、大文件。" "优先提升稳定传输速率"
+  ui_mode_card "3" "快速起速" "适合网页、短连接、小文件。" "缩短连接初期的提速时间"
   echo
   if ! prompt_read "请选择优化目标 [1-3]："; then return 1; fi
   case "$PROMPT_REPLY" in
@@ -1733,10 +1886,13 @@ run_client_optimization() {
     3) objective="startup"; target_retr="5"; rounds="3" ;;
     *) objective="retrans"; target_retr="0"; rounds="5" ;;
   esac
+  selected_label="$(objective_label "$objective")"
 
   echo
-  printf "  %s1%s 下载：服务端 → 本机\n" "$COLOR_CYAN" "$COLOR_RESET"
-  printf "  %s2%s 上传：本机 → 服务端\n" "$COLOR_CYAN" "$COLOR_RESET"
+  ui_section "测试方向"
+  printf "  %s[1]%s 下载  服务端 -> 本机\n" "$COLOR_CYAN" "$COLOR_RESET"
+  printf "  %s[2]%s 上传  本机 -> 服务端\n" "$COLOR_CYAN" "$COLOR_RESET"
+  ui_note "当前选择" "$selected_label · 默认下载方向"
   if ! prompt_read "请选择测试方向 [1-2]："; then return 1; fi
   case "$PROMPT_REPLY" in
     2) reverse="0" ;;
@@ -1756,15 +1912,18 @@ client_menu() {
   while true; do
     render_client_dashboard "$peer" "$client_lan_ip" "$iperf_port"
     echo
-    printf "%s客户端菜单%s\n" "$COLOR_BOLD$COLOR_GREEN" "$COLOR_RESET"
-    print_rule
-    printf "  %s1%s %s开始优化%s\n" "$COLOR_GREEN" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
-    printf "     选择重传优先、吞吐优先或快速起速。\n"
-    printf "  %s2%s 查看本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s3%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s4%s 查看过程记录\n" "$COLOR_CYAN" "$COLOR_RESET"
-    printf "  %s5%s 停止双方会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
-    printf "  %s0%s 退出客户端\n" "$COLOR_DIM" "$COLOR_RESET"
+    ui_section "选择操作"
+    printf "  %s[1]%s %s开始优化%s\n" "$COLOR_GREEN" "$COLOR_RESET" "$COLOR_BOLD" "$COLOR_RESET"
+    printf "      %s选择重传、吞吐或快速起速%s\n" "$COLOR_DIM" "$COLOR_RESET"
+    printf "  %s[2]%s 查看本机状态\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "      %s查看系统与 TCP 参数摘要%s\n" "$COLOR_DIM" "$COLOR_RESET"
+    printf "  %s[3]%s 查看服务端状态\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "      %s检查会话与测速服务%s\n" "$COLOR_DIM" "$COLOR_RESET"
+    printf "  %s[4]%s 查看过程记录\n" "$COLOR_CYAN" "$COLOR_RESET"
+    printf "      %s查看最近任务与结果%s\n" "$COLOR_DIM" "$COLOR_RESET"
+    printf "  %s[5]%s 停止双方会话并退出\n" "$COLOR_YELLOW" "$COLOR_RESET"
+    printf "  %s[0]%s 退出客户端\n" "$COLOR_DIM" "$COLOR_RESET"
+    printf "      %s不停止服务端会话%s\n" "$COLOR_DIM" "$COLOR_RESET"
     echo
     if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
       warn "当前环境没有可用交互输入，客户端已保持连接上报后退出菜单。"
