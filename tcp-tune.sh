@@ -74,19 +74,25 @@ pause_for_enter() {
 ui_pad() {
   text="$1"
   width="$2"
-  printf '%s' "$text" | awk -v w="$width" '{
+  # awk 仅返回显示宽度（CJK 字符算 2），补空格交给 shell printf，兼容 busybox awk
+  disp=$(printf '%s' "$text" | awk '{
     s = $0
     disp = 0
     n = length(s)
     for (i = 1; i <= n; i++) {
       c = substr(s, i, 1)
-      # 按 UTF-8 首字节判断是否多字节字符（>=0xC2 开头）
-      if (c >= "\303") disp += 2; else disp += 1
+      if (c < "\200") disp += 1
+      else if (c >= "\300") disp += 2
     }
-    pad = w - disp
-    if (pad > 0) printf "%s%*s", s, pad, ""
-    else printf "%s", s
-  }'
+    print disp + 0
+  }')
+  [ -z "$disp" ] && disp=0
+  pad=$((width - disp))
+  if [ "$pad" -gt 0 ]; then
+    printf '%s%*s' "$text" "$pad" ""
+  else
+    printf '%s' "$text"
+  fi
 }
 
 print_rule() {
