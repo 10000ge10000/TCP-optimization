@@ -1230,6 +1230,7 @@ auto_tune() {
   first_bps=""
   final_retr="0"
   final_bps="0"
+  completed_rounds="0"
   while [ "$i" -le "$rounds" ]; do
     echo
     ui_section "第 $i/$rounds 轮测试"
@@ -1243,6 +1244,7 @@ auto_tune() {
     bps="${bps:-0}"
     final_retr="$retr"
     final_bps="$bps"
+    completed_rounds="$i"
     [ -n "$first_retr" ] || first_retr="$retr"
     [ -n "$first_bps" ] || first_bps="$bps"
     readable_rate="$(format_rate "$bps")"
@@ -1309,8 +1311,12 @@ auto_tune() {
     previous_bps="$bps"
     i=$((i + 1))
   done
+  [ "$completed_rounds" = "0" ] && completed_rounds="$rounds"
+  clear_screen
+  print_header "优化完成"
+  ui_subtitle "$mode_name · $transfer_name · 共测试 $completed_rounds 轮"
   echo
-  ui_section "优化完成"
+  ui_section "结论"
   final_rate="$(format_rate "$final_bps")"
   final_retr_text="$(format_count "$final_retr")"
   first_rate="$(format_rate "${first_bps:-0}")"

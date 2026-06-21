@@ -291,6 +291,7 @@ function Invoke-WindowsOptimization {
   $firstMetrics = $null
   $bestRate = 0.0
   $lastMetrics = $null
+  $completedRounds = 0
   for ($round = 1; $round -le $SelectedRounds; $round++) {
     Write-Host ""
     Write-Section ("第 {0}/{1} 轮测试" -f $round, $SelectedRounds)
@@ -299,6 +300,7 @@ function Invoke-WindowsOptimization {
     $result = Run-Iperf -HostName $HostName -Port $Port -LocalAddress $LocalAddress -Reverse:($SelectedDirection -eq "download")
     $metrics = Get-IperfMetrics -Result $result
     $lastMetrics = $metrics
+    $completedRounds = $round
     if (-not $firstMetrics) { $firstMetrics = $metrics }
     if ($metrics.BitsPerSecond -gt $bestRate) { $bestRate = $metrics.BitsPerSecond }
 
@@ -337,8 +339,11 @@ function Invoke-WindowsOptimization {
     $previousRate = $metrics.BitsPerSecond
   }
 
+  if ($completedRounds -le 0) { $completedRounds = $SelectedRounds }
+  Write-Header "优化完成"
+  Write-Subtitle "$modeName · $directionName · 共测试 $completedRounds 轮"
   Write-Host ""
-  Write-Section "优化完成"
+  Write-Section "结论"
   if (-not $lastMetrics) { return }
   $firstRateText = Format-Rate $firstMetrics.BitsPerSecond
   $lastRateText = Format-Rate $lastMetrics.BitsPerSecond
