@@ -426,11 +426,11 @@ normalize_profile() {
     "亚太长距"|apac-long) echo "亚太长距" ;;
     "远距穿透"|far-punch) echo "远距穿透" ;;
     "超远距极限"|ultra-far) echo "超远距极限" ;;
-    "稳健入门"|stable|"kxy-9929") echo "近距均衡" ;;
-    "均衡通用"|balanced|"famesystems"|"bwg") echo "近距极速" ;;
-    "中距增强"|medium|"cnf-hk") echo "中距穿越" ;;
-    "高带宽增强"|boost|"rfc-hk") echo "亚太长距" ;;
-    "长距大带宽"|longhaul|"rfc-sg") echo "远距穿透" ;;
+    "稳健入门"|stable) echo "近距均衡" ;;
+    "均衡通用"|balanced) echo "近距极速" ;;
+    "中距增强"|medium) echo "中距穿越" ;;
+    "高带宽增强"|boost) echo "亚太长距" ;;
+    "长距大带宽"|longhaul) echo "远距穿透" ;;
     *) die "未知预设：$1" ;;
   esac
 }
