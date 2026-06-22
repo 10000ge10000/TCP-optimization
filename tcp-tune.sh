@@ -1255,9 +1255,9 @@ tune_step() {
       # 重传优先：减小 notsent_lowat 降低排队深度，
       # 适度收紧 rmem（但不少于 BDP/2），增大 adv_win_scale 减少应用层读取延迟
       if [ "$retr" -gt "$target_retr" ]; then
-        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*0.7); if(v<16384) v=16384; printf "%d", v}')"
-        rmem="$(awk -v r="$rmem" 'BEGIN {printf "%d", int(r*0.9)}')"
-        wmem="$(awk -v w="$wmem" 'BEGIN {printf "%d", int(w*0.9)}')"
+        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*0.85); if(v<16384) v=16384; printf "%d", v}')"
+        rmem="$(awk -v r="$rmem" 'BEGIN {printf "%d", int(r*0.92)}')"
+        wmem="$(awk -v w="$wmem" 'BEGIN {printf "%d", int(w*0.92)}')"
         adv="$(awk -v a="$adv" 'BEGIN {v=a+1; if(v>7) v=7; printf "%d", v}')"
       fi
       ;;
@@ -1362,7 +1362,7 @@ auto_tune() {
     ui_section "第 $i/$rounds 轮测试"
     progress_steps "$i" "$rounds"
     ui_note "状态" "正在用 iperf3 测试真实链路..."
-    json="$(run_iperf_client "$host" "$port" "$reverse" 15 "$bind_ip" || true)"
+    json="$(run_iperf_client "$host" "$port" "$reverse" 20 "$bind_ip" || true)"
     [ -n "$json" ] || die "iperf3 测试失败：未获得输出，请检查对端 iperf3 是否运行、端口是否可达。"
     if ! printf '%s' "$json" | grep -q '"end"'; then
       die "iperf3 测试失败：未获得有效结果。"
@@ -1423,7 +1423,7 @@ auto_tune() {
       case "$objective" in
         retrans)
           # 容忍 30% 单轮波动，只有显著恶化才回滚
-          if awk -v current="$retr" -v previous="$previous_retr" 'BEGIN { exit !(previous > 0 && current > previous * 1.30) }'; then
+          if awk -v current="$retr" -v previous="$previous_retr" 'BEGIN { exit !(previous > 0 && current > previous * 1.50) }'; then
             regressed="1"
           fi
           ;;
