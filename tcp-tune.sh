@@ -1242,24 +1242,45 @@ tune_step() {
   synbacklog="$7"
   optmem="$8"
 
-  if [ "$retr" -gt "$target_retr" ]; then
-    adjusted="$(awk -v r="$rmem" -v w="$wmem" 'BEGIN {printf "%d %d\n", r * 0.85, w * 0.85}')"
-    # shellcheck disable=SC2086
-    set -- $adjusted
-    rmem="$1"
-    wmem="$2"
-  elif [ "$objective" = "throughput" ] && [ "$bps" != "0" ]; then
-    adjusted="$(awk -v r="$rmem" -v w="$wmem" 'BEGIN {printf "%d %d\n", r * 1.08, w * 1.08}')"
-    # shellcheck disable=SC2086
-    set -- $adjusted
-    rmem="$1"
-    wmem="$2"
-  fi
-
   cap="$(memory_cap_bytes "$memory_mb_value" "$aggressive")"
-  min=$((4 * 1024 * 1024))
-  [ "$rmem" -lt "$min" ] && rmem="$min"
-  [ "$wmem" -lt "$min" ] && wmem="$min"
+  # 下限基于 BDP 而非固定 4MB，避免低 BDP 链路缓冲区过大
+  bdp_bytes="$(awk -v bw="$peer_mbps" -v rtt="$rtt_ms" 'BEGIN {b=bw*1024*1024/8*rtt/1000; if(b<32768) b=32768; printf "%d", b}')"
+  min_rmem=$((bdp_bytes / 2))
+  min_wmem=$((bdp_bytes / 4))
+  [ "$min_rmem" -lt 65536 ] && min_rmem=65536
+  [ "$min_wmem" -lt 65536 ] && min_wmem=65536
+
+  case "$objective" in
+    retrans)
+      # 重传优先：减小 notsent_lowat 降低排队深度，
+      # 适度收紧 rmem（但不少于 BDP/2），增大 adv_win_scale 减少应用层读取延迟
+      if [ "$retr" -gt "$target_retr" ]; then
+        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*0.7); if(v<16384) v=16384; printf "%d", v}')"
+        rmem="$(awk -v r="$rmem" 'BEGIN {printf "%d", int(r*0.9)}')"
+        wmem="$(awk -v w="$wmem" 'BEGIN {printf "%d", int(w*0.9)}')"
+        adv="$(awk -v a="$adv" 'BEGIN {v=a+1; if(v>7) v=7; printf "%d", v}')"
+      fi
+      ;;
+    throughput)
+      # 吞吐优先：增大 rmem/wmem 让接收窗口超过 BDP，
+      # 增大 notsent_lowat 允许更多数据在途
+      if [ "$bps" != "0" ]; then
+        rmem="$(awk -v r="$rmem" -v b="$bdp_bytes" 'BEGIN {v=int(r*1.15); if(v<b*2) v=b*2; printf "%d", v}')"
+        wmem="$(awk -v w="$wmem" -v b="$bdp_bytes" 'BEGIN {v=int(w*1.15); if(v<b*2) v=b*2; printf "%d", v}')"
+        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.2); if(v>524288) v=524288; printf "%d", v}')"
+      fi
+      ;;
+    startup)
+      # 起速优先：降低 notsent_lowat 让数据尽快发出，
+      # 降低 adv_win_scale 让内核更早通知窗口，适度增大 wmem
+      notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*0.6); if(v<16384) v=16384; printf "%d", v}')"
+      wmem="$(awk -v w="$wmem" 'BEGIN {printf "%d", int(w*1.2)}')"
+      adv="$(awk -v a="$adv" 'BEGIN {v=a-1; if(v<1) v=1; printf "%d", v}')"
+      ;;
+  esac
+
+  [ "$rmem" -lt "$min_rmem" ] && rmem="$min_rmem"
+  [ "$wmem" -lt "$min_wmem" ] && wmem="$min_wmem"
   [ "$rmem" -gt "$cap" ] && rmem="$cap"
   [ "$wmem" -gt "$cap" ] && wmem="$cap"
 
@@ -1401,15 +1422,18 @@ auto_tune() {
     if [ "$applied_change_count" -gt 0 ] && [ -n "$previous_retr" ]; then
       case "$objective" in
         retrans)
-          [ "$retr" -gt "$previous_retr" ] && regressed="1"
+          # 容忍 30% 单轮波动，只有显著恶化才回滚
+          if awk -v current="$retr" -v previous="$previous_retr" 'BEGIN { exit !(previous > 0 && current > previous * 1.30) }'; then
+            regressed="1"
+          fi
           ;;
         throughput)
-          if awk -v current="$bps" -v previous="$previous_bps" 'BEGIN { exit !(current < previous * 0.95) }'; then
+          if awk -v current="$bps" -v previous="$previous_bps" 'BEGIN { exit !(previous > 0 && current < previous * 0.80) }'; then
             regressed="1"
           fi
           ;;
         startup)
-          if awk -v current="$startup_bps" -v previous="$previous_startup_bps" 'BEGIN { exit !(current < previous * 0.95) }'; then
+          if awk -v current="$startup_bps" -v previous="$previous_startup_bps" 'BEGIN { exit !(previous > 0 && current < previous * 0.75) }'; then
             regressed="1"
           fi
           ;;
