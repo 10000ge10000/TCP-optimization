@@ -170,26 +170,28 @@ sudo sh tcp-tune.sh --yes auto \
 
 ## TCP 预设
 
-预设使用中文名称，并按参数内容命名。
+预设使用中文名称，并按距离/延迟从近到远排列。英文别名用于脚本化调用。
 
-| 预设 | 接收上限 | 发送上限 | 适用场景 |
-|---|---:|---:|---|
-| 稳健入门 | 64MiB | 32MiB | 保守非对称，适合首次尝试 |
-| 均衡通用 | 64MiB | 64MiB | 默认推荐，适合多数 VPS |
-| 中距增强 | 约 85MiB | 约 41MiB | 中等 RTT、中高带宽 |
-| 高带宽增强 | 约 100MiB | 约 48MiB | 高带宽跨境链路 |
-| 长距大带宽 | 约 178MiB | 约 85MiB | 高 RTT、高 BDP 链路 |
+| 预设 | 英文别名 | RTT 参考 | 接收上限 | 发送上限 | 适用场景 |
+|---|---|---:|---:|---:|---|
+| 超近距极速 | `ultra-close` | < 10ms | 32MiB | 32MiB | 同城、同机房、极低延迟 |
+| 近距均衡 | `near-balance` | 10~30ms | 64MiB | 32MiB | 近距精品线路，保守非对称 |
+| 近距极速 | `near-speed` | 30~60ms | 64MiB | 64MiB | 同区域低延迟，对称大缓冲 |
+| 中距穿越 | `mid-cross` | 60~120ms | 约 85MiB | 约 41MiB | 港区跨境、中等 RTT |
+| 亚太长距 | `apac-long` | 120~180ms | 约 100MiB | 约 48MiB | 亚太跨海、高带宽 |
+| 远距穿透 | `far-punch` | 180~250ms | 约 178MiB | 约 85MiB | 欧美方向、高 RTT 大 BDP |
+| 超远距极限 | `ultra-far` | > 250ms | 256MiB | 128MiB | 极远距离、极高延迟 |
 
 英文别名：
 
 ```text
-stable, balanced, medium, boost, longhaul
+ultra-close, near-balance, near-speed, mid-cross, apac-long, far-punch, ultra-far
 ```
 
 应用预设：
 
 ```sh
-sudo sh tcp-tune.sh apply-profile 均衡通用
+sudo sh tcp-tune.sh apply-profile 近距极速
 ```
 
 ## 自动安装依赖

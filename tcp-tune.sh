@@ -411,6 +411,8 @@ install_only() {
 
 profile_exists() {
   case "$1" in
+    "超近距极速"|"近距均衡"|"近距极速"|"中距穿越"|"亚太长距"|"远距穿透"|"超远距极限") return 0 ;;
+    ultra-close|near-balance|near-speed|mid-cross|apac-long|far-punch|ultra-far) return 0 ;;
     "稳健入门"|"均衡通用"|"中距增强"|"高带宽增强"|"长距大带宽") return 0 ;;
     stable|balanced|medium|boost|longhaul) return 0 ;;
     *) return 1 ;;
@@ -484,7 +486,7 @@ TCP 预设（按距离/延迟从近到远排列）：
 1. 超近距极速  (RTT < 10ms, 同城/同机房)
    接收 32MiB / 发送 32MiB，小缓冲极低延迟，适合局域网或同机房。
 
-2. 近距均衡    (RTT 10~30ms, 精品线路/9929)
+2. 近距均衡    (RTT 10~30ms, 近距精品线路)
    接收 64MiB / 发送 32MiB，保守非对称，适合省际精品链路。
 
 3. 近距极速    (RTT 30~60ms, 同区域)
@@ -1021,7 +1023,7 @@ openwrt_advice() {
   fi
   mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
   if [ "$mem_kb" -gt 0 ] && [ "$mem_kb" -lt 262144 ]; then
-    echo "  - 当前内存低于 256MiB，不建议直接使用“长距大带宽”预设。"
+    echo "  - 当前内存低于 256MiB，不建议直接使用“远距穿透”或“超远距极限”预设。"
   fi
 }
 
@@ -2342,7 +2344,7 @@ $APP_NAME $APP_VERSION
   sh tcp-tune.sh join --peer http://IP:PORT --token TOKEN [--direction download|upload] [--objective retrans|throughput|startup]
   sh tcp-tune.sh recommend --local-mbps 1000 --peer-mbps 1000 --rtt-ms 100 --memory-mb 1024
   sh tcp-tune.sh apply-smart --local-mbps 1000 --peer-mbps 1000 --rtt-ms 100 --memory-mb 1024
-  sh tcp-tune.sh apply-profile 均衡通用
+  sh tcp-tune.sh apply-profile 近距极速
   sh tcp-tune.sh apply-buffers RMEM_MAX WMEM_MAX
   sh tcp-tune.sh auto --host IP --direction download --objective retrans --target-retr 0 --rtt-ms 100
   sh tcp-tune.sh rollback
