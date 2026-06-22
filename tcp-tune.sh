@@ -623,8 +623,12 @@ recommend_values() {
 
       rmem = int(model_bdp * recv_mult)
       wmem = int(model_bdp * send_mult)
-      rmem = clamp(rmem, 4 * 1024 * 1024, mem_cap)
-      wmem = clamp(wmem, 4 * 1024 * 1024, mem_cap)
+      rmem_floor = int(base_bdp / 4)
+      if (rmem_floor < 262144) rmem_floor = 262144
+      wmem_floor = int(base_bdp / 4)
+      if (wmem_floor < 262144) wmem_floor = 262144
+      rmem = clamp(rmem, rmem_floor, mem_cap)
+      wmem = clamp(wmem, wmem_floor, mem_cap)
 
       if (objective == "startup") {
         notsent = clamp(int(model_bdp / 32), 16384, 131072)
@@ -1227,25 +1231,28 @@ tune_step() {
     aggressive="${1:-0}"
   fi
 
+  cap="$(memory_cap_bytes "$memory_mb_value" "$aggressive")"
+  bdp_bytes="$(awk -v bw="$peer_mbps" -v rtt="$rtt_ms" 'BEGIN {b=bw*1024*1024/8*rtt/1000; if(b<32768) b=32768; printf "%d", b}')"
+
+  cur_rmem="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 4194304)"
+  cur_wmem="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 4194304)"
+  cur_notsent="$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo 131072)"
+  cur_adv="$(sysctl -n net.ipv4.tcp_adv_win_scale 2>/dev/null || echo 2)"
+
   values="$(recommend_values "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$objective" "$ramp_rate" "$aggressive")"
   case "$values" in
     ERR*) die "$values" ;;
   esac
-
   # shellcheck disable=SC2086
   set -- $values
-  rmem="$1"
-  wmem="$2"
-  adv="$3"
-  notsent="$4"
-  backlog="$5"
-  somaxconn="$6"
-  synbacklog="$7"
-  optmem="$8"
+  rmem="$1"; wmem="$2"; adv="$3"; notsent="$4"
+  backlog="$5"; somaxconn="$6"; synbacklog="$7"; optmem="$8"
 
-  cap="$(memory_cap_bytes "$memory_mb_value" "$aggressive")"
-  # 下限基于 BDP 而非固定 4MB，避免低 BDP 链路缓冲区过大
-  bdp_bytes="$(awk -v bw="$peer_mbps" -v rtt="$rtt_ms" 'BEGIN {b=bw*1024*1024/8*rtt/1000; if(b<32768) b=32768; printf "%d", b}')"
+  rmem="$cur_rmem"
+  wmem="$cur_wmem"
+  notsent="$cur_notsent"
+  adv="$cur_adv"
+
   min_rmem=$((bdp_bytes / 2))
   min_wmem=$((bdp_bytes / 4))
   [ "$min_rmem" -lt 65536 ] && min_rmem=65536
@@ -1253,31 +1260,26 @@ tune_step() {
 
   case "$objective" in
     retrans)
-      # 重传优先：减小 notsent_lowat 降低排队深度，
-      # 适度收紧 rmem（但不少于 BDP/2），增大 adv_win_scale 减少应用层读取延迟
       if [ "$retr" -gt "$target_retr" ]; then
-        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*0.85); if(v<16384) v=16384; printf "%d", v}')"
-        rmem="$(awk -v r="$rmem" 'BEGIN {printf "%d", int(r*0.92)}')"
-        wmem="$(awk -v w="$wmem" 'BEGIN {printf "%d", int(w*0.92)}')"
-        adv="$(awk -v a="$adv" 'BEGIN {v=a+1; if(v>7) v=7; printf "%d", v}')"
+        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*0.80); if(v<16384) v=16384; printf "%d", v}')"
+        if [ "$retr" -gt 2000 ]; then
+          rmem="$(awk -v r="$rmem" 'BEGIN {v=int(r*0.95); if(v<65536) v=65536; printf "%d", v}')"
+          wmem="$(awk -v w="$wmem" 'BEGIN {v=int(w*0.95); if(v<65536) v=65536; printf "%d", v}')"
+        fi
       fi
       ;;
     throughput)
-      # 吞吐优先：增大 rmem/wmem 让接收窗口超过 BDP，
-      # 增大 notsent_lowat 允许更多数据在途
       if [ "$bps" != "0" ]; then
-        rmem="$(awk -v r="$rmem" -v b="$bdp_bytes" 'BEGIN {v=int(r*1.15); if(v<b*2) v=b*2; printf "%d", v}')"
-        wmem="$(awk -v w="$wmem" -v b="$bdp_bytes" 'BEGIN {v=int(w*1.15); if(v<b*2) v=b*2; printf "%d", v}')"
+        rmem="$(awk -v r="$rmem" -v b="$bdp_bytes" 'BEGIN {v=int(r*1.15); if(v<b*2) v=int(b*2); printf "%d", v}')"
+        wmem="$(awk -v w="$wmem" -v b="$bdp_bytes" 'BEGIN {v=int(w*1.15); if(v<b*2) v=int(b*2); printf "%d", v}')"
         notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.2); if(v>524288) v=524288; printf "%d", v}')"
       fi
       ;;
     startup)
-      # 起速优先：增大 notsent_lowat 允许更多数据不等 ACK 就发出，
-      # 增大 adv_win_scale 更激进通知接收窗口，增大 wmem 提高初始发送能力
       notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.15); if(v>131072) v=131072; printf "%d", v}')"
-      wmem="$(awk -v w="$wmem" 'BEGIN {printf "%d", int(w*1.15)}')"
-      rmem="$(awk -v r="$rmem" 'BEGIN {printf "%d", int(r*1.1)}')"
-      adv="$(awk -v a="$adv" 'BEGIN {v=a+1; if(v>7) v=7; printf "%d", v}')"
+      wmem="$(awk -v w="$wmem" 'BEGIN {v=int(w*1.15); if(v<65536) v=65536; printf "%d", v}')"
+      rmem="$(awk -v r="$rmem" 'BEGIN {v=int(r*1.1); if(v<65536) v=65536; printf "%d", v}')"
+      adv="$(awk -v a="$adv" 'BEGIN {v=a+1; if(v>5) v=5; printf "%d", v}')"
       ;;
   esac
 
@@ -1288,6 +1290,7 @@ tune_step() {
 
   echo "$rmem $wmem $adv $notsent $backlog $somaxconn $synbacklog $optmem"
 }
+
 
 auto_tune() {
   host="$1"
@@ -1437,6 +1440,9 @@ auto_tune() {
           if awk -v current="$startup_bps" -v previous="$previous_startup_bps" 'BEGIN { exit !(previous > 0 && current < previous * 0.75) }'; then
             regressed="1"
           fi
+          if awk -v current="$retr" -v previous="$previous_retr" 'BEGIN { exit !(previous > 100 && current > previous * 3.0 && current > 500) }'; then
+            regressed="1"
+          fi
           ;;
       esac
     fi
@@ -1463,11 +1469,22 @@ auto_tune() {
     [ "$peer_mbps" = "0" ] && peer_mbps="$measured_mbps"
     [ "$local_mbps" = "0" ] && local_mbps="$peer_mbps"
 
-    if [ "$objective" = "retrans" ] && [ "$retr" -le "$target_retr" ] && [ "$bps" != "0" ]; then
-      if [ "$i" -gt 1 ] || [ "$applied_change_count" -gt 0 ]; then
-        echo
-        ui_note "结果" "目标已达成，进入结果页。"
-        break
+    if [ "$objective" = "retrans" ] && [ "$bps" != "0" ]; then
+      retrans_target_met="0"
+      if [ "$retr" -le "$target_retr" ]; then
+        retrans_target_met="1"
+      fi
+      if [ -n "$first_retr" ] && [ "$first_retr" -gt 0 ]; then
+        if awk -v r="$retr" -v fir="$first_retr" 'BEGIN { exit !(r < fir * 0.50 && r < 500) }'; then
+          retrans_target_met="1"
+        fi
+      fi
+      if [ "$retrans_target_met" = "1" ]; then
+        if [ "$i" -gt 1 ] || [ "$applied_change_count" -gt 0 ]; then
+          echo
+          ui_note "结果" "目标已达成，进入结果页。"
+          break
+        fi
       fi
     fi
     if [ "$i" -ge "$rounds" ]; then
@@ -1526,11 +1543,17 @@ auto_tune() {
       ui_row "结论" "起速测试完成，末轮首秒速度 $final_startup_rate。"
       ;;
     *)
-      if [ "$final_retr" -gt "$target_retr" ]; then
+      retr_significantly_reduced="0"
+      if [ -n "${first_retr:-}" ] && [ "${first_retr:-0}" -gt 0 ]; then
+        if awk -v r="$final_retr" -v fir="$first_retr" 'BEGIN { exit !(r < fir * 0.50) }'; then
+          retr_significantly_reduced="1"
+        fi
+      fi
+      if [ "$final_retr" -le "$target_retr" ] || [ "$retr_significantly_reduced" = "1" ]; then
+        ui_row "结论" "重传已显著改善，保持当前配置。"
+      else
         warn "已完成 $rounds 轮，重传尚未降至目标值。"
         ui_row "结论" "重传尚未达到目标，建议检查链路质量后再试。"
-      else
-        ui_row "结论" "重传目标已达成，保持当前配置。"
       fi
       ;;
   esac
