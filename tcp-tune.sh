@@ -419,32 +419,47 @@ profile_exists() {
 
 normalize_profile() {
   case "$1" in
-    "稳健入门"|stable) echo "稳健入门" ;;
-    "均衡通用"|balanced) echo "均衡通用" ;;
-    "中距增强"|medium) echo "中距增强" ;;
-    "高带宽增强"|boost) echo "高带宽增强" ;;
-    "长距大带宽"|longhaul) echo "长距大带宽" ;;
+    "超近距极速"|ultra-close) echo "超近距极速" ;;
+    "近距均衡"|near-balance) echo "近距均衡" ;;
+    "近距极速"|near-speed) echo "近距极速" ;;
+    "中距穿越"|mid-cross) echo "中距穿越" ;;
+    "亚太长距"|apac-long) echo "亚太长距" ;;
+    "远距穿透"|far-punch) echo "远距穿透" ;;
+    "超远距极限"|ultra-far) echo "超远距极限" ;;
+    "稳健入门"|stable|"kxy-9929") echo "近距均衡" ;;
+    "均衡通用"|balanced|"famesystems"|"bwg") echo "近距极速" ;;
+    "中距增强"|medium|"cnf-hk") echo "中距穿越" ;;
+    "高带宽增强"|boost|"rfc-hk") echo "亚太长距" ;;
+    "长距大带宽"|longhaul|"rfc-sg") echo "远距穿透" ;;
     *) die "未知预设：$1" ;;
   esac
 }
 
 profile_values() {
   name="$(normalize_profile "$1")"
+  # 输出: file_max rmem_max wmem_max rmem_min rmem_default rmem_max
+  #        wmem_min wmem_default wmem_max adv_win_scale notsent_lowat
   case "$name" in
-    "稳健入门")
-      echo "6815744 67108864 33554432 4096 87380 67108864 4096 16384 33554432"
+    "超近距极速")
+      echo "6815744 33554432 33554432 4096 87380 33554432 4096 16384 33554432 1 32768"
       ;;
-    "均衡通用")
-      echo "6815744 67108864 67108864 4096 87380 67108864 4096 16384 67108864"
+    "近距均衡")
+      echo "6815744 67108864 33554432 4096 87380 67108864 4096 16384 33554432 1 49152"
       ;;
-    "中距增强")
-      echo "6815744 89653247 43033559 8192 87380 89653247 8192 65536 43033559"
+    "近距极速")
+      echo "6815744 67108864 67108864 4096 87380 67108864 4096 16384 67108864 1 65536"
       ;;
-    "高带宽增强")
-      echo "6815744 105062399 50429951 8192 87380 105062399 8192 65536 50429951"
+    "中距穿越")
+      echo "6815744 89653247 43033559 8192 87380 89653247 8192 65536 43033559 1 98304"
       ;;
-    "长距大带宽")
-      echo "6815744 186777599 89653247 8192 87380 186777599 8192 65536 89653247"
+    "亚太长距")
+      echo "6815744 105062399 50429951 8192 87380 105062399 8192 65536 50429951 1 131072"
+      ;;
+    "远距穿透")
+      echo "6815744 186777599 89653247 8192 87380 186777599 8192 65536 89653247 1 196608"
+      ;;
+    "超远距极限")
+      echo "6815744 268435456 134217728 8192 87380 268435456 8192 65536 134217728 1 262144"
       ;;
   esac
 }
@@ -464,24 +479,30 @@ preferred_qdisc() {
 
 list_profiles() {
   cat <<'EOF'
-可选 TCP 预设：
+TCP 预设（按距离/延迟从近到远排列）：
 
-1. 稳健入门
-   接收 64MiB / 发送 32MiB，保守非对称，适合首次尝试。
+1. 超近距极速  (RTT < 10ms, 同城/同机房)
+   接收 32MiB / 发送 32MiB，小缓冲极低延迟，适合局域网或同机房。
 
-2. 均衡通用
-   接收 64MiB / 发送 64MiB，默认推荐，适合大多数 VPS。
+2. 近距均衡    (RTT 10~30ms, 精品线路/9929)
+   接收 64MiB / 发送 32MiB，保守非对称，适合省际精品链路。
 
-3. 中距增强
-   接收约 85MiB / 发送约 41MiB，适合中等 RTT、中高带宽链路。
+3. 近距极速    (RTT 30~60ms, 同区域)
+   接收 64MiB / 发送 64MiB，对称大缓冲，适合日韩/东南亚低延迟链路。
 
-4. 高带宽增强
-   接收约 100MiB / 发送约 48MiB，适合高带宽跨境链路。
+4. 中距穿越    (RTT 60~120ms, 港区跨境)
+   接收约 85MiB / 发送约 41MiB，适合香港中转、中等 RTT 链路。
 
-5. 长距大带宽
-   接收约 178MiB / 发送约 85MiB，适合高 RTT、高 BDP 链路。
+5. 亚太长距    (RTT 120~180ms, 跨境高带宽)
+   接收约 100MiB / 发送约 48MiB，适合亚太区高带宽跨海链路。
 
-英文别名：stable, balanced, medium, boost, longhaul
+6. 远距穿透    (RTT 180~250ms, 欧美)
+   接收约 178MiB / 发送约 85MiB，适合欧美方向高 RTT 大 BDP 链路。
+
+7. 超远距极限  (RTT > 250ms, 极远距)
+   接收约 256MiB / 发送约 128MiB，适合非洲/南美等极端高延迟链路。
+
+英文别名: ultra-close, near-balance, near-speed, mid-cross, apac-long, far-punch, ultra-far
 EOF
 }
 
@@ -506,7 +527,7 @@ memory_cap_bytes() {
       else if (mem <= 2048) ratio = 0.12
       else ratio = 0.15
       if (aggressive == 1 && mem > 512) ratio += 0.03
-      printf "%d\n", clamp(int(mem_bytes * ratio), 4 * 1024 * 1024, 256 * 1024 * 1024)
+      printf "%d\n", clamp(int(mem_bytes * ratio), 262144, 268435456)
     }
   '
 }
@@ -767,8 +788,9 @@ write_sysctl_config() {
   tcp_wmem_min="$7"
   tcp_wmem_default="$8"
   tcp_wmem_max="$9"
+  adv_win_scale="${10:-1}"
+  notsent_lowat="${11:-16384}"
   qdisc="$(preferred_qdisc)"
-  notsent_lowat="16384"
   limit_output=131072
 
   cat > "$SYSCTL_FILE" <<EOF
@@ -782,7 +804,7 @@ net.ipv4.tcp_rfc1337 = 0
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_fack = 1
 net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = 2
+net.ipv4.tcp_adv_win_scale = $adv_win_scale
 net.ipv4.tcp_moderate_rcvbuf = 1
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
