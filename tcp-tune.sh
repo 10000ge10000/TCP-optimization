@@ -1272,11 +1272,12 @@ tune_step() {
       fi
       ;;
     startup)
-      # 起速优先：降低 notsent_lowat 让数据尽快发出，
-      # 降低 adv_win_scale 让内核更早通知窗口，适度增大 wmem
-      notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*0.6); if(v<16384) v=16384; printf "%d", v}')"
-      wmem="$(awk -v w="$wmem" 'BEGIN {printf "%d", int(w*1.2)}')"
-      adv="$(awk -v a="$adv" 'BEGIN {v=a-1; if(v<1) v=1; printf "%d", v}')"
+      # 起速优先：增大 notsent_lowat 允许更多数据不等 ACK 就发出，
+      # 增大 adv_win_scale 更激进通知接收窗口，增大 wmem 提高初始发送能力
+      notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.3); if(v>262144) v=262144; printf "%d", v}')"
+      wmem="$(awk -v w="$wmem" 'BEGIN {printf "%d", int(w*1.15)}')"
+      rmem="$(awk -v r="$rmem" 'BEGIN {printf "%d", int(r*1.1)}')"
+      adv="$(awk -v a="$adv" 'BEGIN {v=a+1; if(v>7) v=7; printf "%d", v}')"
       ;;
   esac
 
