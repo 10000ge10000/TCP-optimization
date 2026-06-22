@@ -1124,17 +1124,18 @@ run_iperf_client() {
       bind_ip=""
       ;;
   esac
+  # -O 3: 3秒预热不纳入统计，减少连接建立阶段的波动
   if [ "$reverse" = "1" ]; then
     if [ -n "$bind_ip" ]; then
-      iperf3 -c "$host" -p "$port" -B "$bind_ip" -R -t "$seconds" -J
+      iperf3 -c "$host" -p "$port" -B "$bind_ip" -R -t "$seconds" -O 3 -J
     else
-      iperf3 -c "$host" -p "$port" -R -t "$seconds" -J
+      iperf3 -c "$host" -p "$port" -R -t "$seconds" -O 3 -J
     fi
   else
     if [ -n "$bind_ip" ]; then
-      iperf3 -c "$host" -p "$port" -B "$bind_ip" -t "$seconds" -J
+      iperf3 -c "$host" -p "$port" -B "$bind_ip" -t "$seconds" -O 3 -J
     else
-      iperf3 -c "$host" -p "$port" -t "$seconds" -J
+      iperf3 -c "$host" -p "$port" -t "$seconds" -O 3 -J
     fi
   fi
 }
@@ -1422,7 +1423,6 @@ auto_tune() {
     if [ "$applied_change_count" -gt 0 ] && [ -n "$previous_retr" ]; then
       case "$objective" in
         retrans)
-          # 容忍 30% 单轮波动，只有显著恶化才回滚
           if awk -v current="$retr" -v previous="$previous_retr" 'BEGIN { exit !(previous > 0 && current > previous * 1.50) }'; then
             regressed="1"
           fi
@@ -1440,14 +1440,22 @@ auto_tune() {
       esac
     fi
     if [ "$regressed" = "1" ]; then
-      warn "本轮表现较上轮退化，正在回滚最新参数调整。"
-      rollback_last
-      applied_change_count=$((applied_change_count - 1))
-      rolled_back_regression="1"
-      final_retr="$previous_retr"
-      final_bps="$previous_bps"
-      final_startup_bps="$previous_startup_bps"
-      break
+      consecutive_regression="${consecutive_regression:-0}"
+      consecutive_regression=$((consecutive_regression + 1))
+      if [ "$consecutive_regression" -ge 2 ]; then
+        warn "连续 2 轮退化，正在回滚最新参数调整。"
+        rollback_last
+        applied_change_count=$((applied_change_count - 1))
+        rolled_back_regression="1"
+        final_retr="$previous_retr"
+        final_bps="$previous_bps"
+        final_startup_bps="$previous_startup_bps"
+        break
+      else
+        warn "本轮表现波动，暂不回滚，下一轮继续观察。"
+      fi
+    else
+      consecutive_regression="0"
     fi
 
     measured_mbps="$(awk -v bps="$bps" 'BEGIN {v=bps/1000000; if (v < 1) v=1; printf "%d\n", v}')"
