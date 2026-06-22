@@ -581,8 +581,8 @@ recommend_values() {
       high_latency = rtt > 120 ? 1 : 0
 
       if (objective == "throughput") {
-        recv_mult = high_latency ? 4.5 : 3.0
-        send_mult = high_latency ? 2.2 : 1.5
+        recv_mult = high_latency ? 6.0 : 5.0
+        send_mult = high_latency ? 3.0 : 2.5
       } else if (objective == "startup") {
         recv_mult = high_latency ? 2.8 : 2.0
         send_mult = high_latency ? 1.2 : 0.9
@@ -1270,9 +1270,12 @@ tune_step() {
       ;;
     throughput)
       if [ "$bps" != "0" ]; then
-        rmem="$(awk -v r="$rmem" -v b="$bdp_bytes" 'BEGIN {v=int(r*1.15); if(v<b*2) v=int(b*2); printf "%d", v}')"
-        wmem="$(awk -v w="$wmem" -v b="$bdp_bytes" 'BEGIN {v=int(w*1.15); if(v<b*2) v=int(b*2); printf "%d", v}')"
-        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.2); if(v>524288) v=524288; printf "%d", v}')"
+        rmem="$(awk -v r="$rmem" -v b="$bdp_bytes" 'BEGIN {v=int(r*1.35); if(v<b*4) v=int(b*4); printf "%d", v}')"
+        wmem="$(awk -v w="$wmem" -v b="$bdp_bytes" 'BEGIN {v=int(w*1.35); if(v<b*4) v=int(b*4); printf "%d", v}')"
+        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.25); if(v>262144) v=262144; printf "%d", v}')"
+        if [ "$adv" -gt 1 ]; then
+          adv="$(awk -v a="$adv" 'BEGIN {v=a-1; if(v<1) v=1; printf "%d", v}')"
+        fi
       fi
       ;;
     startup)
@@ -1508,8 +1511,8 @@ auto_tune() {
       }')"
     elif [ "$objective" = "throughput" ]; then
       ramp_rate="$(awk -v r="$ramp_rate" -v retr="$retr" -v target="$target_retr" 'BEGIN {
-        if (retr <= target) v = r * 1.08
-        else v = r * 0.92
+        if (retr <= target) v = r * 1.15
+        else v = r * 0.90
         if (v > 1.20) v = 1.20
         if (v < 0.45) v = 0.45
         printf "%.3f\n", v
