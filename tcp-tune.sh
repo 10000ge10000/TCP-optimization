@@ -1118,6 +1118,12 @@ run_iperf_client() {
   seconds="$4"
   bind_ip="${5:-}"
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法测试。"
+  # host 是 IPv6 地址（含冒号）时不能用 IPv4 源地址绑定，否则 iperf3 报 Invalid argument
+  case "$host" in
+    *:*)
+      bind_ip=""
+      ;;
+  esac
   if [ "$reverse" = "1" ]; then
     if [ -n "$bind_ip" ]; then
       iperf3 -c "$host" -p "$port" -B "$bind_ip" -R -t "$seconds" -J
@@ -1336,13 +1342,19 @@ auto_tune() {
     progress_steps "$i" "$rounds"
     ui_note "状态" "正在用 iperf3 测试真实链路..."
     json="$(run_iperf_client "$host" "$port" "$reverse" 15 "$bind_ip" || true)"
-    [ -n "$json" ] || die "iperf3 测试失败。"
+    [ -n "$json" ] || die "iperf3 测试失败：未获得输出，请检查对端 iperf3 是否运行、端口是否可达。"
+    if ! printf '%s' "$json" | grep -q '"end"'; then
+      die "iperf3 测试失败：未获得有效结果。"
+    fi
     retr="$(printf '%s\n' "$json" | extract_retransmits)"
     bps="$(printf '%s\n' "$json" | extract_bps)"
     startup_bps="$(printf '%s\n' "$json" | extract_first_interval_bps)"
     retr="${retr:-0}"
     bps="${bps:-0}"
     startup_bps="${startup_bps:-0}"
+    if [ "$bps" = "0" ] && [ "$i" = "1" ]; then
+      die "iperf3 返回 0 速率，测速可能失败。请检查网络连通性。"
+    fi
     final_retr="$retr"
     final_bps="$bps"
     final_startup_bps="$startup_bps"
@@ -1418,10 +1430,12 @@ auto_tune() {
     [ "$peer_mbps" = "0" ] && peer_mbps="$measured_mbps"
     [ "$local_mbps" = "0" ] && local_mbps="$peer_mbps"
 
-    if [ "$objective" = "retrans" ] && [ "$retr" -le "$target_retr" ]; then
-      echo
-      ui_note "结果" "目标已达成，进入结果页。"
-      break
+    if [ "$objective" = "retrans" ] && [ "$retr" -le "$target_retr" ] && [ "$bps" != "0" ]; then
+      if [ "$i" -gt 1 ] || [ "$applied_change_count" -gt 0 ]; then
+        echo
+        ui_note "结果" "目标已达成，进入结果页。"
+        break
+      fi
     fi
     if [ "$i" -ge "$rounds" ]; then
       echo
