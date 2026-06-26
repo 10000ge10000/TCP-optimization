@@ -16,6 +16,8 @@ NVIDIA_BASE_URL="${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}"
 NVIDIA_MODEL="${NVIDIA_MODEL:-auto}"
 TCP_TUNE_AI_TIMEOUT="${TCP_TUNE_AI_TIMEOUT:-20}"
 TCP_TUNE_AI_MAX_ROUNDS="${TCP_TUNE_AI_MAX_ROUNDS:-5}"
+TCP_TUNE_AI_GATEWAY_URL="${TCP_TUNE_AI_GATEWAY_URL:-}"
+TCP_TUNE_AI_GATEWAY_TOKEN="${TCP_TUNE_AI_GATEWAY_TOKEN:-}"
 AI_MODEL_CANDIDATES="${TCP_TUNE_AI_MODELS:-minimaxai/minimax-m3 moonshotai/kimi-k2.6 minimaxai/minimax-m2.7 z-ai/glm-5.1}"
 VPS_ADAPT_FILE="${TCP_TUNE_VPS_ADAPT_FILE:-/etc/sysctl.d/98-tcp-ipv6-openwrt-peer.conf}"
 OPENWRT_MINIMAL_FILE="${TCP_TUNE_OPENWRT_MINIMAL_FILE:-/etc/sysctl.d/zz-tcp-ipv6-local-peer.conf}"
@@ -1139,7 +1141,9 @@ vps_adapt_profile() {
 
 ai_require_env() {
   have_cmd python3 || die "AI 模式需要 python3。"
-  [ -n "${NVIDIA_API_KEY:-}" ] || die "缺少 NVIDIA_API_KEY。请通过环境变量提供，不要写入脚本或仓库。"
+  if [ -z "${NVIDIA_API_KEY:-}" ] && [ -z "${TCP_TUNE_AI_GATEWAY_URL:-}" ]; then
+    die "缺少 NVIDIA_API_KEY 或 TCP_TUNE_AI_GATEWAY_URL。请通过环境变量提供，不要把真实 Key 写入脚本或仓库。"
+  fi
 }
 
 ai_python_client() {
@@ -1156,12 +1160,13 @@ import urllib.error
 import urllib.request
 
 mode = sys.argv[1]
-base_url = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
-api_key = os.environ.get("NVIDIA_API_KEY", "")
+gateway_url = os.environ.get("TCP_TUNE_AI_GATEWAY_URL", "").strip()
+base_url = (gateway_url or os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")).rstrip("/")
+api_key = os.environ.get("NVIDIA_API_KEY", "") or os.environ.get("TCP_TUNE_AI_GATEWAY_TOKEN", "")
 timeout = float(os.environ.get("TCP_TUNE_AI_TIMEOUT", "20"))
 
 def post_chat(model, messages, max_tokens=256):
-    if not api_key:
+    if not api_key and not gateway_url:
         raise RuntimeError("missing NVIDIA_API_KEY")
     body = {
         "model": model,
@@ -1169,13 +1174,13 @@ def post_chat(model, messages, max_tokens=256):
         "temperature": 0,
         "max_tokens": max_tokens,
     }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
     req = urllib.request.Request(
         base_url + "/chat/completions",
         data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer " + api_key,
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
