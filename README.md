@@ -187,6 +187,15 @@ export NVIDIA_API_KEY="你的 Nvidia API Key"
 sh tcp-tune.sh ai-benchmark-models
 ```
 
+默认候选模型使用 NVIDIA Build/OpenAI-compatible 需要的完整模型 ID：
+
+```text
+minimaxai/minimax-m3
+moonshotai/kimi-k2.6
+minimaxai/minimax-m2.7
+z-ai/glm-5.1
+```
+
 GitHub Actions 中使用：
 
 1. 打开仓库 `Settings` -> `Secrets and variables` -> `Actions`。
