@@ -12,6 +12,14 @@ IPERF_PORT="${TCP_TUNE_IPERF_PORT:-5201}"
 SESSION_TTL="${TCP_TUNE_SESSION_TTL:-1800}"
 DRY_RUN="${TCP_TUNE_DRY_RUN:-0}"
 LISTEN_PUBLIC_URL="${TCP_TUNE_PUBLIC_URL:-}"
+NVIDIA_BASE_URL="${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}"
+NVIDIA_MODEL="${NVIDIA_MODEL:-auto}"
+TCP_TUNE_AI_TIMEOUT="${TCP_TUNE_AI_TIMEOUT:-20}"
+TCP_TUNE_AI_MAX_ROUNDS="${TCP_TUNE_AI_MAX_ROUNDS:-5}"
+AI_MODEL_CANDIDATES="${TCP_TUNE_AI_MODELS:-minimax-m3 kimi-k2.6 minimax-m2.7 z-ai/glm-5.1}"
+VPS_ADAPT_FILE="${TCP_TUNE_VPS_ADAPT_FILE:-/etc/sysctl.d/98-tcp-ipv6-openwrt-peer.conf}"
+OPENWRT_MINIMAL_FILE="${TCP_TUNE_OPENWRT_MINIMAL_FILE:-/etc/sysctl.d/zz-tcp-ipv6-local-peer.conf}"
+LAST_MANUAL_BACKUP=""
 
 COLOR_RESET=""
 COLOR_BOLD=""
@@ -972,6 +980,571 @@ rollback_last() {
   rollback_target="$(unique_path "$STATE_DIR/rolled-back/$(basename "$latest")")"
   mv "$latest" "$rollback_target"
   info "已回滚到最近备份：$latest"
+}
+
+manual_backup_begin() {
+  label="$1"
+  ensure_state_dir
+  ts="$(date +%Y%m%d-%H%M%S)"
+  dir="$(unique_path "$STATE_DIR/manual-$label-$ts")"
+  mkdir -p "$dir"
+  sysctl -a 2>/dev/null | grep -E '^(fs.file-max|net\.core\.|net\.ipv4\.tcp_|net\.ipv4\.udp_)' > "$dir/before-sysctl.txt" || true
+  [ -f /etc/sysctl.conf ] && cp /etc/sysctl.conf "$dir/sysctl.conf.before" || true
+  [ -f "$VPS_ADAPT_FILE" ] && cp "$VPS_ADAPT_FILE" "$dir/$(basename "$VPS_ADAPT_FILE").before" || true
+  [ -f "$OPENWRT_MINIMAL_FILE" ] && cp "$OPENWRT_MINIMAL_FILE" "$dir/$(basename "$OPENWRT_MINIMAL_FILE").before" || true
+  [ -f "$SYSCTL_FILE" ] && cp "$SYSCTL_FILE" "$dir/$(basename "$SYSCTL_FILE").before" || true
+  LAST_MANUAL_BACKUP="$dir"
+  echo "$dir"
+}
+
+restore_manual_backup() {
+  backup_dir="$1"
+  [ -n "$backup_dir" ] || return 1
+  [ -d "$backup_dir" ] || return 1
+  if [ -f "$backup_dir/$(basename "$VPS_ADAPT_FILE").before" ]; then
+    cp "$backup_dir/$(basename "$VPS_ADAPT_FILE").before" "$VPS_ADAPT_FILE"
+  elif [ -f "$VPS_ADAPT_FILE" ]; then
+    rm -f "$VPS_ADAPT_FILE"
+  fi
+  if [ -f "$backup_dir/$(basename "$OPENWRT_MINIMAL_FILE").before" ]; then
+    cp "$backup_dir/$(basename "$OPENWRT_MINIMAL_FILE").before" "$OPENWRT_MINIMAL_FILE"
+  elif [ -f "$OPENWRT_MINIMAL_FILE" ]; then
+    rm -f "$OPENWRT_MINIMAL_FILE"
+  fi
+  if [ -f "$backup_dir/sysctl.conf.before" ]; then
+    cp "$backup_dir/sysctl.conf.before" /etc/sysctl.conf
+  fi
+  for file in "$VPS_ADAPT_FILE" "$OPENWRT_MINIMAL_FILE" /etc/sysctl.conf; do
+    [ -f "$file" ] && sysctl -e -p "$file" >/dev/null 2>&1 || true
+  done
+  info "已按手动备份回滚：$backup_dir"
+}
+
+validate_bool_number() {
+  case "$1" in
+    0|1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_positive_int_range() {
+  value="$1"
+  min="$2"
+  max="$3"
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  awk -v value="$value" -v min="$min" -v max="$max" 'BEGIN { exit !(value + 0 >= min + 0 && value + 0 <= max + 0) }'
+}
+
+apply_vps_adapt_values() {
+  congestion="$1"
+  mtu_probing="$2"
+  slow_start="$3"
+  rmem_max="$4"
+  wmem_max="$5"
+  notsent_lowat="$6"
+  limit_output="$7"
+
+  need_root
+  case "$congestion" in bbr|cubic|reno) ;; *) die "非法拥塞控制：$congestion" ;; esac
+  validate_bool_number "$mtu_probing" || die "非法 tcp_mtu_probing：$mtu_probing"
+  validate_bool_number "$slow_start" || die "非法 tcp_slow_start_after_idle：$slow_start"
+  validate_positive_int_range "$rmem_max" 1048576 268435456 || die "非法 rmem_max：$rmem_max"
+  validate_positive_int_range "$wmem_max" 1048576 268435456 || die "非法 wmem_max：$wmem_max"
+  validate_positive_int_range "$notsent_lowat" 16384 4294967295 || die "非法 tcp_notsent_lowat：$notsent_lowat"
+  validate_positive_int_range "$limit_output" 131072 4194304 || die "非法 tcp_limit_output_bytes：$limit_output"
+
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    info "[dry-run] VPS 将写入：cc=$congestion mtu=$mtu_probing slow_start=$slow_start rmem=$rmem_max wmem=$wmem_max notsent=$notsent_lowat limit=$limit_output"
+    return 0
+  fi
+
+  backup_dir="$(manual_backup_begin "ipv6-vps")"
+  cat > "$VPS_ADAPT_FILE" <<EOF
+# TCP-optimization: IPv6 peer adaptation profile.
+# This file is managed by tcp-tune.sh; rollback data: $backup_dir
+net.ipv4.tcp_congestion_control = $congestion
+net.ipv4.tcp_mtu_probing = $mtu_probing
+net.ipv4.tcp_slow_start_after_idle = $slow_start
+net.core.rmem_max = $rmem_max
+net.core.wmem_max = $wmem_max
+net.ipv4.tcp_rmem = 4096 87380 $rmem_max
+net.ipv4.tcp_wmem = 4096 16384 $wmem_max
+net.ipv4.tcp_notsent_lowat = $notsent_lowat
+net.ipv4.tcp_limit_output_bytes = $limit_output
+EOF
+  sysctl -e -p "$VPS_ADAPT_FILE" >/dev/null || die "VPS 适配参数加载失败，备份目录：$backup_dir"
+  LAST_MANUAL_BACKUP="$backup_dir"
+  info "VPS 适配参数已保存并加载：$VPS_ADAPT_FILE"
+  info "备份目录：$backup_dir"
+}
+
+apply_openwrt_minimal_values() {
+  mtu_probing="$1"
+  slow_start="$2"
+  notsent_lowat="$3"
+  limit_output="$4"
+
+  need_root
+  validate_bool_number "$mtu_probing" || die "非法 tcp_mtu_probing：$mtu_probing"
+  validate_bool_number "$slow_start" || die "非法 tcp_slow_start_after_idle：$slow_start"
+  validate_positive_int_range "$notsent_lowat" 16384 4294967295 || die "非法 tcp_notsent_lowat：$notsent_lowat"
+  validate_positive_int_range "$limit_output" 131072 4194304 || die "非法 tcp_limit_output_bytes：$limit_output"
+
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    info "[dry-run] OpenWrt 将最小写入：mtu=$mtu_probing slow_start=$slow_start notsent=$notsent_lowat limit=$limit_output"
+    return 0
+  fi
+
+  backup_dir="$(manual_backup_begin "ipv6-openwrt")"
+  cat > "$OPENWRT_MINIMAL_FILE" <<EOF
+# TCP-optimization: minimal local overrides for verified IPv6 peer paths.
+# This file does not touch firewall, WAN, DNS, DHCP or proxy services.
+net.ipv4.tcp_slow_start_after_idle = $slow_start
+net.ipv4.tcp_notsent_lowat = $notsent_lowat
+net.ipv4.tcp_limit_output_bytes = $limit_output
+EOF
+  if [ -f /etc/sysctl.conf ]; then
+    if grep -q '^net\.ipv4\.tcp_mtu_probing[[:space:]]*=' /etc/sysctl.conf; then
+      sed -i "s|^net\\.ipv4\\.tcp_mtu_probing[[:space:]]*=.*|net.ipv4.tcp_mtu_probing=$mtu_probing|" /etc/sysctl.conf
+    else
+      printf '\nnet.ipv4.tcp_mtu_probing=%s\n' "$mtu_probing" >> /etc/sysctl.conf
+    fi
+  fi
+  sysctl -w \
+    net.ipv4.tcp_mtu_probing="$mtu_probing" \
+    net.ipv4.tcp_slow_start_after_idle="$slow_start" \
+    net.ipv4.tcp_notsent_lowat="$notsent_lowat" \
+    net.ipv4.tcp_limit_output_bytes="$limit_output" >/dev/null || die "OpenWrt 最小参数加载失败，备份目录：$backup_dir"
+  LAST_MANUAL_BACKUP="$backup_dir"
+  info "OpenWrt 最小参数已保存并加载：$OPENWRT_MINIMAL_FILE"
+  info "备份目录：$backup_dir"
+}
+
+vps_adapt_profile() {
+  profile="$1"
+  case "$profile" in
+    cubic-safe|balanced)
+      apply_vps_adapt_values cubic 1 0 67108864 67108864 4294967295 1048576
+      ;;
+    bbr-fast)
+      apply_vps_adapt_values bbr 1 0 67108864 67108864 4294967295 1048576
+      ;;
+    *)
+      die "未知 VPS 适配预设：$profile"
+      ;;
+  esac
+}
+
+ai_require_env() {
+  have_cmd python3 || die "AI 模式需要 python3。"
+  [ -n "${NVIDIA_API_KEY:-}" ] || die "缺少 NVIDIA_API_KEY。请通过环境变量提供，不要写入脚本或仓库。"
+}
+
+ai_python_client() {
+  mode="$1"
+  shift || true
+  tmp_py="${TMPDIR:-/tmp}/tcp-tune-ai-$$.py"
+  cat > "$tmp_py" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
+mode = sys.argv[1]
+base_url = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
+api_key = os.environ.get("NVIDIA_API_KEY", "")
+timeout = float(os.environ.get("TCP_TUNE_AI_TIMEOUT", "20"))
+
+def post_chat(model, messages, max_tokens=256):
+    if not api_key:
+        raise RuntimeError("missing NVIDIA_API_KEY")
+    body = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+    }
+    req = urllib.request.Request(
+        base_url + "/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data["choices"][0]["message"]["content"]
+
+def extract_json(text):
+    text = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    if fenced:
+        text = fenced.group(1)
+    else:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end >= start:
+            text = text[start:end + 1]
+    return json.loads(text)
+
+if mode == "benchmark":
+    models = sys.argv[2:]
+    results = []
+    for model in models:
+        start = time.time()
+        try:
+            content = post_chat(model, [{"role": "user", "content": "Return only OK."}], 16)
+            elapsed = time.time() - start
+            ok = bool(content.strip())
+            results.append((elapsed, model, ok, ""))
+            print(f"{model}\tOK\t{elapsed:.3f}s")
+        except Exception as exc:
+            results.append((999999.0, model, False, str(exc).splitlines()[0][:120]))
+            print(f"{model}\tFAIL\t{str(exc).splitlines()[0][:120]}")
+    usable = [item for item in results if item[2]]
+    if not usable:
+        sys.exit(2)
+    usable.sort()
+    print("BEST\t" + usable[0][1])
+elif mode == "select":
+    configured = os.environ.get("NVIDIA_MODEL", "auto")
+    if configured and configured != "auto":
+        print(configured)
+        sys.exit(0)
+    models = sys.argv[2:]
+    best = None
+    for model in models:
+        start = time.time()
+        try:
+            post_chat(model, [{"role": "user", "content": "Return only OK."}], 16)
+            elapsed = time.time() - start
+            if best is None or elapsed < best[0]:
+                best = (elapsed, model)
+        except Exception:
+            continue
+    if best is None:
+        sys.exit(2)
+    print(best[1])
+elif mode == "decide":
+    model = sys.argv[2]
+    objective = sys.argv[3]
+    role = sys.argv[4]
+    summary = sys.stdin.read()
+    system = (
+        "You are a conservative TCP tuning controller. "
+        "Return only one JSON object. Do not include shell commands. "
+        "Allowed congestion values: cubic,bbr,reno. "
+        "Allowed integer fields: mtu_probing 0/1, slow_start_after_idle 0/1, "
+        "rmem_max,wmem_max between 1048576 and 268435456, "
+        "notsent_lowat between 16384 and 4294967295, "
+        "limit_output_bytes between 131072 and 4194304. "
+        "OpenWrt may only use minimal=true plus mtu_probing, slow_start_after_idle, notsent_lowat, limit_output_bytes."
+    )
+    user = (
+        "Objective: " + objective + "\nRole: " + role + "\n"
+        "Prefer VPS-side adaptation. For high VPS->OpenWrt retransmits with good throughput, prefer cubic-safe. "
+        "For OpenWrt upload bottlenecks that remain low across tests, do not over-increase buffers.\n"
+        "Return JSON shape: {\"vps\":{\"congestion\":\"cubic\",\"mtu_probing\":1,\"slow_start_after_idle\":0,"
+        "\"rmem_max\":67108864,\"wmem_max\":67108864,\"notsent_lowat\":4294967295,"
+        "\"limit_output_bytes\":1048576},\"openwrt\":{\"minimal\":true,\"mtu_probing\":1,"
+        "\"slow_start_after_idle\":0,\"notsent_lowat\":4294967295,\"limit_output_bytes\":1048576},"
+        "\"reason\":\"short Chinese reason\"}.\nSummary JSON:\n" + summary
+    )
+    content = post_chat(model, [{"role": "system", "content": system}, {"role": "user", "content": user}], 512)
+    print(json.dumps(extract_json(content), ensure_ascii=False, separators=(",", ":")))
+elif mode == "normalize":
+    role = sys.argv[2]
+    raw = sys.stdin.read()
+    data = extract_json(raw)
+    vps = data.get("vps") if isinstance(data.get("vps"), dict) else {}
+    op = data.get("openwrt") if isinstance(data.get("openwrt"), dict) else {}
+    reason = str(data.get("reason", ""))[:160].replace("'", "")
+
+    def choice(value, allowed, default):
+        value = str(value or default)
+        return value if value in allowed else default
+
+    def integer(value, default, low, high):
+        try:
+            value = int(value)
+        except Exception:
+            value = default
+        return max(low, min(high, value))
+
+    out = {
+        "vps_congestion": choice(vps.get("congestion"), {"cubic", "bbr", "reno"}, "cubic"),
+        "vps_mtu_probing": integer(vps.get("mtu_probing"), 1, 0, 1),
+        "vps_slow_start": integer(vps.get("slow_start_after_idle"), 0, 0, 1),
+        "vps_rmem_max": integer(vps.get("rmem_max"), 67108864, 1048576, 268435456),
+        "vps_wmem_max": integer(vps.get("wmem_max"), 67108864, 1048576, 268435456),
+        "vps_notsent": integer(vps.get("notsent_lowat"), 4294967295, 16384, 4294967295),
+        "vps_limit": integer(vps.get("limit_output_bytes"), 1048576, 131072, 4194304),
+        "op_minimal": 1 if op.get("minimal", True) else 0,
+        "op_mtu_probing": integer(op.get("mtu_probing"), 1, 0, 1),
+        "op_slow_start": integer(op.get("slow_start_after_idle"), 0, 0, 1),
+        "op_notsent": integer(op.get("notsent_lowat"), 4294967295, 16384, 4294967295),
+        "op_limit": integer(op.get("limit_output_bytes"), 1048576, 131072, 4194304),
+        "ai_reason": reason,
+    }
+    if role == "vps":
+        keys = ["vps_congestion", "vps_mtu_probing", "vps_slow_start", "vps_rmem_max", "vps_wmem_max", "vps_notsent", "vps_limit", "ai_reason"]
+    elif role == "openwrt":
+        keys = ["op_minimal", "op_mtu_probing", "op_slow_start", "op_notsent", "op_limit", "ai_reason"]
+    else:
+        keys = list(out.keys())
+    for key in keys:
+        print(f"{key}='{out[key]}'")
+else:
+    raise SystemExit("unknown mode")
+PY
+  python3 "$tmp_py" "$mode" "$@"
+  rc="$?"
+  rm -f "$tmp_py"
+  return "$rc"
+}
+
+ai_select_model() {
+  # shellcheck disable=SC2086
+  ai_python_client select $AI_MODEL_CANDIDATES
+}
+
+ai_benchmark_models() {
+  ai_require_env
+  print_header "AI 模型测速"
+  ui_subtitle "只发送短测试请求，不输出 API Key。"
+  # shellcheck disable=SC2086
+  ai_python_client benchmark $AI_MODEL_CANDIDATES
+}
+
+ai_measure_pair() {
+  host="$1"
+  port="$2"
+  seconds="${3:-12}"
+  bind_ip="$(local_lan_ipv4 || true)"
+  case "$host" in *:*) bind_ip="" ;; esac
+
+  ui_note "测速" "上传：本机 → 对端" >&2
+  upload_json="$(run_iperf_client "$host" "$port" 0 "$seconds" "$bind_ip" || true)"
+  [ -n "$upload_json" ] && printf '%s' "$upload_json" | grep -q '"end"' || die "上传测速失败。"
+  if printf '%s' "$upload_json" | grep -q '"error"'; then
+    die "上传测速失败：$(printf '%s' "$upload_json" | awk -F'"' '/"error"/ {print $4; exit}')"
+  fi
+  upload_bps="$(printf '%s\n' "$upload_json" | extract_bps)"
+  upload_retr="$(printf '%s\n' "$upload_json" | extract_retransmits)"
+  [ -n "$upload_bps" ] || die "上传测速失败：iperf3 未返回 bits_per_second。"
+  upload_bps="${upload_bps:-0}"
+  upload_retr="${upload_retr:-0}"
+
+  ui_note "测速" "下载：对端 → 本机" >&2
+  download_json="$(run_iperf_client "$host" "$port" 1 "$seconds" "$bind_ip" || true)"
+  [ -n "$download_json" ] && printf '%s' "$download_json" | grep -q '"end"' || die "下载测速失败。"
+  if printf '%s' "$download_json" | grep -q '"error"'; then
+    die "下载测速失败：$(printf '%s' "$download_json" | awk -F'"' '/"error"/ {print $4; exit}')"
+  fi
+  download_bps="$(printf '%s\n' "$download_json" | extract_bps)"
+  download_retr="$(printf '%s\n' "$download_json" | extract_retransmits)"
+  [ -n "$download_bps" ] || die "下载测速失败：iperf3 未返回 bits_per_second。"
+  download_bps="${download_bps:-0}"
+  download_retr="${download_retr:-0}"
+
+  cat <<EOF
+{"upload_bits_per_second":$upload_bps,"upload_retransmits":$upload_retr,"download_bits_per_second":$download_bps,"download_retransmits":$download_retr}
+EOF
+}
+
+metric_from_summary() {
+  key="$1"
+  awk -v key="\"$key\"" '
+    {
+      line = $0
+      gsub(/[{}]/, "", line)
+      n = split(line, parts, ",")
+      for (i = 1; i <= n; i++) {
+        split(parts[i], kv, ":")
+        gsub(/[" ]/, "", kv[1])
+        gsub(/[" ]/, "", kv[2])
+        if ("\"" kv[1] "\"" == key || kv[1] == substr(key, 2, length(key) - 2)) {
+          print kv[2]
+          exit
+        }
+      }
+    }
+  '
+}
+
+summary_regressed() {
+  before="$1"
+  after="$2"
+  before_up="$(printf '%s\n' "$before" | metric_from_summary upload_bits_per_second)"
+  after_up="$(printf '%s\n' "$after" | metric_from_summary upload_bits_per_second)"
+  before_down="$(printf '%s\n' "$before" | metric_from_summary download_bits_per_second)"
+  after_down="$(printf '%s\n' "$after" | metric_from_summary download_bits_per_second)"
+  before_ur="$(printf '%s\n' "$before" | metric_from_summary upload_retransmits)"
+  after_ur="$(printf '%s\n' "$after" | metric_from_summary upload_retransmits)"
+  before_dr="$(printf '%s\n' "$before" | metric_from_summary download_retransmits)"
+  after_dr="$(printf '%s\n' "$after" | metric_from_summary download_retransmits)"
+  awk -v bu="${before_up:-0}" -v au="${after_up:-0}" -v bd="${before_down:-0}" -v ad="${after_down:-0}" \
+      -v bur="${before_ur:-0}" -v aur="${after_ur:-0}" -v bdr="${before_dr:-0}" -v adr="${after_dr:-0}" '
+    BEGIN {
+      bad = 0
+      if (bu > 0 && au < bu * 0.95) bad = 1
+      if (bd > 0 && ad < bd * 0.95) bad = 1
+      if (bur > 100 && aur > bur * 1.5) bad = 1
+      if (bdr > 100 && adr > bdr * 1.5) bad = 1
+      exit !bad
+    }
+  '
+}
+
+print_ai_summary_metrics() {
+  title="$1"
+  summary="$2"
+  up="$(printf '%s\n' "$summary" | metric_from_summary upload_bits_per_second)"
+  ur="$(printf '%s\n' "$summary" | metric_from_summary upload_retransmits)"
+  down="$(printf '%s\n' "$summary" | metric_from_summary download_bits_per_second)"
+  dr="$(printf '%s\n' "$summary" | metric_from_summary download_retransmits)"
+  ui_section "$title"
+  ui_row "上传速度" "$(format_rate "${up:-0}")"
+  ui_row "上传重传" "$(format_count "${ur:-0}") 次"
+  ui_row "下载速度" "$(format_rate "${down:-0}")"
+  ui_row "下载重传" "$(format_count "${dr:-0}") 次"
+}
+
+ai_decision_for_summary() {
+  summary="$1"
+  objective="$2"
+  role="$3"
+  model="$4"
+  prompt_summary="$(cat <<EOF
+{"objective":"$objective","role":"$role","os":"${OS_NAME:-unknown}","family":"${OS_FAMILY:-unknown}","metrics":$summary,"current":{"congestion":"$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)","qdisc":"$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)","rmem_max":$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0),"wmem_max":$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0),"notsent_lowat":$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo 0),"limit_output_bytes":$(sysctl -n net.ipv4.tcp_limit_output_bytes 2>/dev/null || echo 0)}}
+EOF
+)"
+  printf '%s' "$prompt_summary" | ai_python_client decide "$model" "$objective" "$role"
+}
+
+apply_ai_decision() {
+  role="$1"
+  decision="$2"
+  normalized="$(printf '%s' "$decision" | ai_python_client normalize "$role")" || die "AI 决策解析失败。"
+  # normalize 只输出白名单 key='value'，值已做枚举/数值边界校验。
+  eval "$normalized"
+  ui_note "AI 理由" "${ai_reason:-未提供}"
+  case "$role" in
+    vps)
+      apply_vps_adapt_values "$vps_congestion" "$vps_mtu_probing" "$vps_slow_start" "$vps_rmem_max" "$vps_wmem_max" "$vps_notsent" "$vps_limit"
+      ;;
+    openwrt)
+      [ "${op_minimal:-1}" = "1" ] || die "OpenWrt 侧只允许 minimal 调整。"
+      apply_openwrt_minimal_values "$op_mtu_probing" "$op_slow_start" "$op_notsent" "$op_limit"
+      ;;
+    *)
+      die "未知 AI 执行角色：$role"
+      ;;
+  esac
+}
+
+ai_auto_mode() {
+  host=""
+  port="$IPERF_PORT"
+  objective="balanced"
+  rounds="$TCP_TUNE_AI_MAX_ROUNDS"
+  role="auto"
+  seconds="12"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --peer|--host) host="$2"; shift 2 ;;
+      --port|--iperf-port) port="$2"; shift 2 ;;
+      --objective) objective="$2"; shift 2 ;;
+      --rounds) rounds="$2"; shift 2 ;;
+      --role) role="$2"; shift 2 ;;
+      --seconds) seconds="$2"; shift 2 ;;
+      *) die "未知 ai-auto 参数：$1" ;;
+    esac
+  done
+  [ -n "$host" ] || die "ai-auto 需要 --peer"
+  case "$objective" in balanced|throughput|retrans) ;; *) die "--objective 只支持 balanced、throughput、retrans" ;; esac
+  validate_positive_int_range "$rounds" 1 "$TCP_TUNE_AI_MAX_ROUNDS" || die "--rounds 必须在 1 和 $TCP_TUNE_AI_MAX_ROUNDS 之间。"
+  validate_positive_int_range "$seconds" 5 60 || die "--seconds 必须在 5 和 60 之间。"
+
+  need_root
+  ai_require_env
+  install_runtime_deps
+  detect_os
+  if [ "$role" = "auto" ]; then
+    if [ "$OS_FAMILY" = "openwrt" ]; then role="openwrt"; else role="vps"; fi
+  fi
+  case "$role" in vps|openwrt) ;; *) die "--role 只支持 auto、vps、openwrt" ;; esac
+
+  clear_screen
+  print_header "AI 自动调参"
+  ui_row "角色" "$role"
+  ui_row "对端" "$host"
+  ui_row "目标" "$objective"
+  ui_row "轮数" "$rounds"
+  ui_note "安全边界" "AI 不能执行任意命令，只能触发脚本内置白名单动作。"
+
+  model="$(ai_select_model)" || die "没有可用 AI 模型。"
+  ui_row "模型" "$model"
+
+  round=1
+  previous_summary=""
+  while [ "$round" -le "$rounds" ]; do
+    echo
+    ui_section "第 $round/$rounds 轮基线"
+    summary="$(ai_measure_pair "$host" "$port" "$seconds")"
+    print_ai_summary_metrics "测速摘要" "$summary"
+    decision="$(ai_decision_for_summary "$summary" "$objective" "$role" "$model")" || die "AI 决策请求失败。"
+    ui_note "AI 决策" "$decision"
+    previous_summary="$summary"
+    previous_backup="$LAST_MANUAL_BACKUP"
+    apply_ai_decision "$role" "$decision"
+    current_backup="$LAST_MANUAL_BACKUP"
+
+    echo
+    ui_section "复测"
+    after_summary="$(ai_measure_pair "$host" "$port" "$seconds")"
+    print_ai_summary_metrics "复测摘要" "$after_summary"
+    if summary_regressed "$previous_summary" "$after_summary"; then
+      warn "复测指标退化超过阈值，正在回滚本轮 AI 调整。"
+      restore_manual_backup "$current_backup"
+      break
+    fi
+    ui_note "结果" "本轮调整通过复测，继续下一轮或结束。"
+    round=$((round + 1))
+  done
+  echo
+  ui_section "完成"
+  ui_row "最终角色" "$role"
+  ui_row "模型" "$model"
+  ui_note "回滚" "如需撤销最近保留的手动适配，可使用备份目录中的 before 文件恢复。"
+}
+
+ai_diagnose_mode() {
+  summary_file=""
+  objective="balanced"
+  role="vps"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --summary) summary_file="$2"; shift 2 ;;
+      --objective) objective="$2"; shift 2 ;;
+      --role) role="$2"; shift 2 ;;
+      *) die "未知 ai-diagnose 参数：$1" ;;
+    esac
+  done
+  [ -n "$summary_file" ] || die "ai-diagnose 需要 --summary FILE"
+  [ -f "$summary_file" ] || die "summary 文件不存在：$summary_file"
+  ai_require_env
+  detect_os
+  model="$(ai_select_model)" || die "没有可用 AI 模型。"
+  summary="$(cat "$summary_file")"
+  ai_decision_for_summary "$summary" "$objective" "$role" "$model"
 }
 
 status_short() {
@@ -2347,12 +2920,22 @@ $APP_NAME $APP_VERSION
   sh tcp-tune.sh apply-profile 近距极速
   sh tcp-tune.sh apply-buffers RMEM_MAX WMEM_MAX
   sh tcp-tune.sh auto --host IP --direction download --objective retrans --target-retr 0 --rtt-ms 100
+  sh tcp-tune.sh ai-auto --peer IPV6 --objective balanced --rounds 5
+  sh tcp-tune.sh ai-benchmark-models
+  sh tcp-tune.sh ai-diagnose --summary SUMMARY.json
+  sh tcp-tune.sh local-minimal --ipv6-peer IPV6
+  sh tcp-tune.sh vps-adapt --peer-ipv6 IPV6 --profile cubic-safe
   sh tcp-tune.sh rollback
   sh tcp-tune.sh stop-agent
 
 全局选项：
   --yes    允许自动安装缺失依赖
   --dry-run    只展示将执行的动作，不写入系统
+
+AI 环境变量：
+  NVIDIA_API_KEY    必填，只从环境变量读取，不写入仓库或日志
+  NVIDIA_BASE_URL   默认 https://integrate.api.nvidia.com/v1
+  NVIDIA_MODEL      默认 auto，会在候选模型中选择最快可用项
 EOF
 }
 
@@ -2411,6 +2994,39 @@ main() {
       fi
       ;;
     rollback) rollback_last ;;
+    ai-benchmark-models)
+      ai_benchmark_models
+      ;;
+    ai-diagnose)
+      ai_diagnose_mode "$@"
+      ;;
+    ai-auto)
+      ai_auto_mode "$@"
+      ;;
+    local-minimal)
+      ipv6_peer=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --ipv6-peer|--peer) ipv6_peer="$2"; shift 2 ;;
+          *) die "未知 local-minimal 参数：$1" ;;
+        esac
+      done
+      [ -n "$ipv6_peer" ] || warn "未提供 --ipv6-peer，将仅应用本机最小修正。"
+      apply_openwrt_minimal_values 1 0 4294967295 1048576
+      ;;
+    vps-adapt)
+      profile="cubic-safe"
+      peer_ipv6=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --peer-ipv6|--peer) peer_ipv6="$2"; shift 2 ;;
+          --profile) profile="$2"; shift 2 ;;
+          *) die "未知 vps-adapt 参数：$1" ;;
+        esac
+      done
+      [ -n "$peer_ipv6" ] || warn "未提供 --peer-ipv6，将仅应用 VPS 适配预设。"
+      vps_adapt_profile "$profile"
+      ;;
     server|listen)
       while [ "$#" -gt 0 ]; do
         case "$1" in

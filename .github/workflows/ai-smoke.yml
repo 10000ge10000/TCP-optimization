@@ -1,0 +1,43 @@
+name: AI smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "NVIDIA model name, or auto"
+        required: false
+        default: "auto"
+      timeout:
+        description: "AI request timeout in seconds"
+        required: false
+        default: "40"
+
+permissions:
+  contents: read
+
+jobs:
+  ai-smoke:
+    name: Benchmark NVIDIA models
+    runs-on: ubuntu-latest
+    env:
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY || vars.NVIDIA_API_KEY }}
+      NVIDIA_MODEL: ${{ inputs.model }}
+      TCP_TUNE_AI_TIMEOUT: ${{ inputs.timeout }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate scripts
+        run: |
+          bash -n tcp-tune.sh
+          pwsh -NoProfile -Command '$errors = $null; [System.Management.Automation.PSParser]::Tokenize((Get-Content -LiteralPath ./tcp-tune.ps1 -Raw), [ref]$errors) | Out-Null; if ($errors) { $errors; exit 1 }'
+
+      - name: Check NVIDIA_API_KEY
+        run: |
+          if [ -z "${NVIDIA_API_KEY:-}" ]; then
+            echo "NVIDIA_API_KEY is not configured. Add it as a repository secret, or as a repository variable for non-sensitive testing."
+            exit 1
+          fi
+
+      - name: Run AI benchmark
+        run: sh tcp-tune.sh ai-benchmark-models

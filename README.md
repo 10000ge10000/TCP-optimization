@@ -2,7 +2,7 @@
 
 仓库地址：<https://github.com/10000ge10000/TCP-optimization>
 
-`TCP-optimization` 是一个双端 TCP 调优工具。它面向 VPS + OpenWrt / Linux / macOS / Windows 客户端的真实链路测试：服务端一条命令启动并保持只读监控，客户端复制命令加入，通过临时 Agent 通讯，用 iperf3 测速结果驱动客户端本机 TCP 参数优化。
+`TCP-optimization` 是一个双端 TCP 调优工具。它面向 VPS + OpenWrt / Linux / macOS / Windows 客户端的真实链路测试：服务端一条命令启动并默认保持只读监控，客户端复制命令加入，通过临时 Agent 通讯，用 iperf3 测速结果驱动 TCP 参数优化。显式启用 AI/适配命令时，工具支持“VPS 为主、OpenWrt 少量必要修改”的 IPv6 链路适配。
 
 ## 最短使用路径
 
@@ -85,7 +85,7 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 
 优化过程使用面向用户的摘要：优化模式、测试方向、当前轮次、Mbps/Gbps、重传次数、变化趋势、快速起速的首秒速度、当前调整动作和最终结论。`rmem/wmem`、`tcp_notsent_lowat`、`tcp_limit_output_bytes` 等原始参数不再占据主流程，但仍会写入配置并保留回滚备份。
 
-Windows PowerShell 客户端使用相同的中文菜单和三种模式。Windows 端默认只执行真实链路测试、目标判定和优化建议，不自动写 Windows TCP 栈；Linux/OpenWrt 客户端才会自动保存内核参数。服务端始终保持只读，不接受参数写入。
+Windows PowerShell 客户端使用相同的中文菜单和三种模式。Windows 端默认只执行真实链路测试、目标判定和优化建议，不自动写 Windows TCP 栈；Linux/OpenWrt 客户端才会自动保存内核参数。服务端 `server` 模式默认只读，不接受参数写入；只有显式运行 `ai-auto`、`vps-adapt`、`local-minimal` 等本机命令时才会写入受控 sysctl。
 
 自动优化只保留经过下一轮 iperf3 复测的参数。最后一轮不会再写入未经验证的新参数；如果重传、吞吐或首秒速度相对上一轮明显退化，脚本会自动撤销最新调整并保留上一轮更优配置。
 
@@ -168,6 +168,43 @@ sudo sh tcp-tune.sh --yes auto \
 --allow-same-public-ip
 ```
 
+AI 辅助双端调优：
+
+```sh
+export NVIDIA_API_KEY="你的 Nvidia API Key"
+sudo sh tcp-tune.sh ai-auto \
+  --peer 2406:xxxx:xxxx::1 \
+  --objective balanced \
+  --rounds 5
+```
+
+AI 模式会先做 IPv6 单线程上传/下载基线测试，再把脱敏摘要发送到 `NVIDIA_BASE_URL`。模型只能返回结构化 JSON 决策，脚本只执行白名单动作，不允许模型输出任意 shell 命令。
+
+模型自动测速：
+
+```sh
+export NVIDIA_API_KEY="你的 Nvidia API Key"
+sh tcp-tune.sh ai-benchmark-models
+```
+
+GitHub Actions 中使用：
+
+1. 打开仓库 `Settings` -> `Secrets and variables` -> `Actions`。
+2. 推荐在 `Secrets` 中新增 `NVIDIA_API_KEY`。如果只是临时测试，也可以在 `Variables` 中新增同名变量。
+3. 进入 `Actions` -> `AI smoke test` -> `Run workflow`，即可让 GitHub Runner 调用 `sh tcp-tune.sh ai-benchmark-models`。
+
+注意：GitHub 的 Secrets/Variables 只会注入到 GitHub Actions 运行环境，不会自动出现在 VPS、OpenWrt 或用户本机。通过 `curl | sh`、SSH、本地脚本运行 AI 模式时，仍需要在那台机器上设置 `NVIDIA_API_KEY` 环境变量。
+
+确定性适配命令：
+
+```sh
+# VPS 侧：主要适配本地 OpenWrt 链路，默认 cubic-safe
+sudo sh tcp-tune.sh vps-adapt --peer-ipv6 2408:xxxx::1 --profile cubic-safe
+
+# OpenWrt 侧：只做最小本地修正，不碰防火墙、WAN、DNS、DHCP、代理服务
+sudo sh tcp-tune.sh local-minimal --ipv6-peer 2406:xxxx::1
+```
+
 ## TCP 预设
 
 预设使用中文名称，并按距离/延迟从近到远排列。英文别名用于脚本化调用。
@@ -219,6 +256,13 @@ Linux/OpenWrt 参数写入：
 /etc/sysctl.d/99-tcp-tune.conf
 ```
 
+AI/IPv6 双端适配额外写入：
+
+```text
+VPS:     /etc/sysctl.d/98-tcp-ipv6-openwrt-peer.conf
+OpenWrt: /etc/sysctl.d/zz-tcp-ipv6-local-peer.conf
+```
+
 运行状态和备份：
 
 ```text
@@ -249,6 +293,8 @@ sudo sh tcp-tune.sh rollback
 - 清理时会同步删除会话 token、连接 URL 和临时 Agent 脚本；测速日志和参数备份继续保留。
 - 工具只停止自己记录 pid 的临时进程，不会主动误杀用户已有的长期 iperf3 服务。
 - 默认 Agent 是 HTTP 明文，只建议用于临时可信调优会话。
+- AI 模式只从环境变量读取 `NVIDIA_API_KEY`，不要把 Key 写入脚本、README、`.env` 或命令日志。
+- AI 运行时调参是直接执行，但只执行脚本内置白名单动作；不会允许模型修改防火墙、路由、DNS、DHCP、代理服务或执行任意 shell 命令。
 
 停止会话：
 

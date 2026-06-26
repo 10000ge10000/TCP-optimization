@@ -8,7 +8,7 @@
 https://github.com/10000ge10000/TCP-optimization
 ```
 
-它面向公网 VPS 与 OpenWrt / Linux / macOS / Windows 客户端，通过只读服务端、临时 HTTP Agent 和 iperf3 测试结果完成状态交换、测速、客户端本机参数推荐、自动调优和回滚。
+它面向公网 VPS 与 OpenWrt / Linux / macOS / Windows 客户端，通过默认只读服务端、临时 HTTP Agent、iperf3 测试结果和可选 AI 决策完成状态交换、测速、参数推荐、自动调优和回滚。
 
 核心体验：
 
@@ -22,7 +22,8 @@ https://github.com/10000ge10000/TCP-optimization
   -> 自动安装依赖
   -> 上报状态
   -> 进入客户端菜单
-客户端通过菜单进行测速和本机优化，服务端仅展示状态和结果
+客户端通过菜单进行测速和本机优化，服务端默认仅展示状态和结果
+显式运行 ai-auto / vps-adapt / local-minimal 时，当前机器可执行受控 sysctl 写入
 ```
 
 ## 2. 技术栈
@@ -30,6 +31,7 @@ https://github.com/10000ge10000/TCP-optimization
 - Shell：Linux/OpenWrt/macOS 主脚本 `tcp-tune.sh`
 - PowerShell：Windows 客户端 `tcp-tune.ps1`
 - Python 标准库：服务端临时 HTTP Agent
+- NVIDIA OpenAI-compatible API：可选 AI 运行时调参建议
 - iperf3：上传/下载方向测速
 - sysctl：Linux/OpenWrt TCP 参数写入
 - curl/wget：下载脚本和调用 Agent
@@ -40,10 +42,12 @@ https://github.com/10000ge10000/TCP-optimization
 
 - 系统识别：识别 OpenWrt、Debian/Ubuntu、RHEL 系、macOS。
 - 依赖安装：按包管理器自动安装 iperf3、curl、python3。
-- 服务端模式：启动 Agent、iperf3，输出客户端命令并进入前台只读监控；不修改服务端 TCP 参数。
+- 服务端模式：启动 Agent、iperf3，输出客户端命令并进入前台只读监控；默认不修改服务端 TCP 参数。
 - 客户端模式：探测并上报局域网 IPv4，进入客户端菜单。
 - 智能推荐：按 BDP、RTT、内存和目标生成 TCP 参数。
 - 自动优化：提供重传优先、吞吐优先、快速起速三种目标，按 iperf3 Retr、总吞吐和首秒吞吐迭代调整参数；最后一轮不写入未经复测的参数，指标退化时自动撤销最新调整。
+- AI 自动调参：`ai-auto` 将脱敏测速摘要发送给 NVIDIA API，模型只返回结构化 JSON，脚本按白名单和上下限校验后执行。
+- 双端适配：`vps-adapt` 主要调整 VPS 发送侧，`local-minimal` 只对 OpenWrt 写入少量必要 TCP 参数。
 - 客户端展示：隐藏代理公网地址，展示本机 LAN 地址和语义化测速结果；原始 sysctl 参数降级为详细信息。
 - 备份回滚：每次写入前保存 live sysctl 快照。
 - 安全清理：停止本工具创建并记录 pid 的临时 Agent/iperf3。
@@ -100,6 +104,19 @@ iperf3 JSON
   -> sysctl -p
 ```
 
+AI 自动调参：
+
+```text
+ai-auto
+  -> benchmark/select model
+  -> iperf3 upload/download baseline
+  -> send redacted summary to NVIDIA /v1/chat/completions
+  -> parse structured JSON decision
+  -> validate whitelist and numeric bounds
+  -> apply vps-adapt or local-minimal on current host
+  -> retest and rollback on regression
+```
+
 ## 5. Agent 协议
 
 Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 校验。
@@ -115,7 +132,7 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 | `POST` | `/test` | 触发服务端 iperf3 测试 |
 | `POST` | `/stop` | 停止服务端会话 |
 
-所有端点都必须通过请求头 `X-TCP-Tune-Token` 或 query token 校验。文档和日志不应泄露 token。`/optimize`、`/apply-profile`、`/apply-buffers` 明确返回 `403 server is read-only`，防止客户端或外部请求修改服务端 TCP 参数。
+所有端点都必须通过请求头 `X-TCP-Tune-Token` 或 query token 校验。文档和日志不应泄露 token。普通 `server` 会话中的 `/optimize`、`/apply-profile`、`/apply-buffers` 仍明确返回 `403 server is read-only`；VPS 写入必须通过本机显式命令 `ai-auto` 或 `vps-adapt` 触发。
 
 ## 6. 配置与状态
 
@@ -130,6 +147,11 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 | `TCP_TUNE_SESSION_TTL` | `1800` | 会话有效期 |
 | `TCP_TUNE_PUBLIC_URL` | 空 | 手动指定客户端连接 URL |
 | `TCP_TUNE_DRY_RUN` | `0` | 预览模式 |
+| `NVIDIA_API_KEY` | 空 | AI 模式必填，只从环境变量读取 |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | NVIDIA OpenAI-compatible 接口地址 |
+| `NVIDIA_MODEL` | `auto` | 固定模型或自动选择最快可用模型 |
+| `TCP_TUNE_AI_TIMEOUT` | `20` | AI 请求超时秒数 |
+| `TCP_TUNE_AI_MAX_ROUNDS` | `5` | AI 自动调参最大轮数 |
 
 运行状态：
 
@@ -144,6 +166,13 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 └── iperf3-PORT.pid
 ```
 
+AI/IPv6 适配文件：
+
+```text
+VPS:     /etc/sysctl.d/98-tcp-ipv6-openwrt-peer.conf
+OpenWrt: /etc/sysctl.d/zz-tcp-ipv6-local-peer.conf
+```
+
 ## 7. 安全设计
 
 - Agent 默认临时运行，不注册系统服务。
@@ -151,6 +180,8 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 - TTL 到期后 Agent 拒绝新操作。
 - 写入类操作只接受白名单 endpoint。
 - Python Agent 只执行固定脚本参数，不接受任意 shell 命令。
+- AI 决策只允许结构化 JSON，不接受任意 shell 命令。
+- AI 可写入参数受白名单和数值上下限限制；OpenWrt 侧不会修改防火墙、WAN、DNS、DHCP、代理服务或路由。
 - Ctrl+C、菜单停止和 `/stop` 会清理本工具创建的 pid、token、连接 URL 和临时 Agent 脚本，并保留日志和参数备份。
 - 不停止没有 pid 记录的长期 iperf3，避免误杀用户自建服务。
 
@@ -164,6 +195,7 @@ OpenWrt 默认作为客户端使用：
 - 缺少 `tc` 时只给建议，不阻断基础测速。
 - 智能推荐受内存护栏限制。
 - 默认不修改 forwarding，不改变路由器角色。
+- `local-minimal` 只允许写入 `tcp_mtu_probing`、`tcp_slow_start_after_idle`、`tcp_notsent_lowat`、`tcp_limit_output_bytes`。
 
 ## 9. 测试策略
 
@@ -189,6 +221,10 @@ sh tcp-tune.sh --dry-run server --public-url http://1.2.3.4:39188
 - OpenWrt 运行 `client`
 - 验证 `/status`、`/events`、`/test`、`/report`、`/stop`
 - 验证服务端写入端点返回 `403`
+- 验证 `ai-benchmark-models` 在缺少 `NVIDIA_API_KEY` 时明确失败
+- 验证 AI 返回非法 JSON、未知字段或越界参数时不会写入
+- 验证 `vps-adapt` 和 `local-minimal` 写入前创建 `/var/lib/tcp-tune/manual-*` 备份
+- 验证 AI 调整后吞吐下降超过 5% 或重传明显升高时自动回滚
 - 验证 Ctrl+C、客户端停止或 TTL 到期后无 Agent/iperf3 残留
 - 验证 `rollback` 恢复修改前 live sysctl 快照
 
@@ -209,3 +245,7 @@ SSH 控制不适合一键配对体验。临时 HTTP Agent 使用随机 token 和
 ### 决策：只停止本工具创建的进程
 
 安全清理只依赖 pid 文件，不主动停止未记录的长期 iperf3 服务，避免误杀用户已有测试服务。
+
+### 决策：AI 直接执行但受白名单约束
+
+AI 参与运行时自动调参，但不能输出任意命令。脚本只接受结构化字段，并在执行前做枚举和数值边界校验。默认策略是 VPS 侧承担主要适配，OpenWrt 侧只做最小必要修正。
