@@ -105,14 +105,12 @@ z-ai/glm-5.1
 本机运行：
 
 ```sh
-export NVIDIA_API_KEY="你的 NVIDIA API Key"
 sh tcp-tune.sh ai-benchmark-models
 ```
 
 AI 自动调参：
 
 ```sh
-export NVIDIA_API_KEY="你的 NVIDIA API Key"
 sudo sh tcp-tune.sh ai-auto --peer 2406:xxxx:xxxx::1 --objective balanced --rounds 5
 ```
 
@@ -132,15 +130,23 @@ GitHub Actions 测试：
 
 ### 让所有用户使用项目提供的 AI
 
-可以做，但不能把 NVIDIA Key 写进脚本。正确方式是你部署一个 AI 中转网关：
+项目已经提供默认 AI 中转网关：
+
+```text
+https://tcp-optimization-ai-gateway.10454728.workers.dev/v1
+```
+
+普通用户不需要配置 NVIDIA Key。脚本会在没有检测到 `NVIDIA_API_KEY` 时自动使用这个网关。
+
+正确架构是：
 
 ```text
 用户脚本 -> 你的 AI 网关 -> NVIDIA API
 ```
 
-这样真实 Key 只在网关服务器里，用户脚本只知道网关地址。网关侧负责限流、鉴权、额度控制和日志脱敏。
+真实 Key 只在 Cloudflare Worker Secret 里，用户脚本只知道网关地址。网关侧负责模型白名单、请求限制、限流和日志脱敏。
 
-脚本已经支持这种模式：
+如果你要改成自己的网关：
 
 ```sh
 export TCP_TUNE_AI_GATEWAY_URL="https://你的网关域名/v1"
@@ -155,7 +161,14 @@ export TCP_TUNE_AI_GATEWAY_TOKEN="网关令牌"
 sh tcp-tune.sh ai-benchmark-models
 ```
 
-在网关正式上线前，普通用户仍需要自己配置 `NVIDIA_API_KEY`。GitHub Secret 只能给 GitHub Actions 用，不能自动下发给所有运行脚本的用户。
+如果你想绕过公共网关，也可以自己提供 NVIDIA Key：
+
+```sh
+export NVIDIA_API_KEY="你的 NVIDIA API Key"
+sh tcp-tune.sh ai-benchmark-models
+```
+
+GitHub Secret 只给 GitHub Actions 用，不会自动下发给所有运行脚本的用户。
 
 ## VPS + OpenWrt 的推荐策略
 
@@ -278,7 +291,7 @@ OpenWrt: /etc/sysctl.d/zz-tcp-ipv6-local-peer.conf
 - Agent 使用随机 token，请不要把 token 发到公开群聊或截图里。
 - Ctrl+C、停止会话或 TTL 到期会清理本工具创建的临时进程。
 - 只停止本工具记录 pid 的进程，不误杀你已有的长期 iperf3。
-- AI Key 只从环境变量、GitHub Secret 或你自建的 AI 网关读取，不要写进脚本、README、`.env` 或日志。
+- AI Key 只放在 Cloudflare Worker Secret、环境变量或 GitHub Secret，不要写进脚本、README、`.env` 或日志。
 - AI 不能执行任意命令，只能返回受控参数。
 - OpenWrt 最小修正不会修改防火墙、WAN、DNS、DHCP、代理服务。
 
@@ -290,13 +303,14 @@ OpenWrt: /etc/sysctl.d/zz-tcp-ipv6-local-peer.conf
 - workflow 只从 `secrets.NVIDIA_API_KEY` 读取。
 - 日志不会打印 Key。
 - API 请求只发往 `NVIDIA_BASE_URL`，默认是 `https://integrate.api.nvidia.com/v1`。
-- 如使用项目公共 AI，应通过 `TCP_TUNE_AI_GATEWAY_URL` 指向你自己的中转服务，而不是公开 NVIDIA Key。
+- 默认公共 AI 网关运行在 Cloudflare Workers，真实 NVIDIA Key 保存在 Worker Secret 中。
+- 网关只允许项目默认模型白名单，并限制请求大小和 `max_tokens`。
 
 仍然要注意：
 
 - 不要把 Key 写进命令截图、README、Issue、日志。
 - 不要把 `NVIDIA_API_KEY` 配成 GitHub Repository Variable，使用 Secret。
-- 不要把真实 NVIDIA Key 放进公开脚本。想给所有用户共用 AI，就用中转网关做限流和审计。
+- 不要把真实 NVIDIA Key 放进公开脚本。公共 AI 必须经过中转网关做限流和审计。
 - 如果 Key 曾经在聊天、截图或终端记录中明文出现过，建议轮换一次。
 
 ## 排障

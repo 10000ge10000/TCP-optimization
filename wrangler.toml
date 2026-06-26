@@ -1,0 +1,3 @@
+name = "tcp-optimization-ai-gateway"
+main = "workers/nvidia-ai-gateway.js"
+compatibility_date = "2026-06-27"

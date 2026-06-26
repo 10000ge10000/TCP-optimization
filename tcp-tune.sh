@@ -18,6 +18,10 @@ TCP_TUNE_AI_TIMEOUT="${TCP_TUNE_AI_TIMEOUT:-20}"
 TCP_TUNE_AI_MAX_ROUNDS="${TCP_TUNE_AI_MAX_ROUNDS:-5}"
 TCP_TUNE_AI_GATEWAY_URL="${TCP_TUNE_AI_GATEWAY_URL:-}"
 TCP_TUNE_AI_GATEWAY_TOKEN="${TCP_TUNE_AI_GATEWAY_TOKEN:-}"
+TCP_TUNE_DEFAULT_AI_GATEWAY_URL="${TCP_TUNE_DEFAULT_AI_GATEWAY_URL:-https://tcp-optimization-ai-gateway.10454728.workers.dev/v1}"
+if [ -z "${NVIDIA_API_KEY:-}" ] && [ -z "$TCP_TUNE_AI_GATEWAY_URL" ]; then
+  TCP_TUNE_AI_GATEWAY_URL="$TCP_TUNE_DEFAULT_AI_GATEWAY_URL"
+fi
 AI_MODEL_CANDIDATES="${TCP_TUNE_AI_MODELS:-minimaxai/minimax-m3 moonshotai/kimi-k2.6 minimaxai/minimax-m2.7 z-ai/glm-5.1}"
 VPS_ADAPT_FILE="${TCP_TUNE_VPS_ADAPT_FILE:-/etc/sysctl.d/98-tcp-ipv6-openwrt-peer.conf}"
 OPENWRT_MINIMAL_FILE="${TCP_TUNE_OPENWRT_MINIMAL_FILE:-/etc/sysctl.d/zz-tcp-ipv6-local-peer.conf}"
@@ -1149,6 +1153,7 @@ ai_require_env() {
 ai_python_client() {
   mode="$1"
   shift || true
+  export NVIDIA_BASE_URL NVIDIA_MODEL TCP_TUNE_AI_TIMEOUT TCP_TUNE_AI_GATEWAY_URL TCP_TUNE_AI_GATEWAY_TOKEN
   tmp_py="${TMPDIR:-/tmp}/tcp-tune-ai-$$.py"
   cat > "$tmp_py" <<'PY'
 import json
@@ -1174,7 +1179,11 @@ def post_chat(model, messages, max_tokens=256):
         "temperature": 0,
         "max_tokens": max_tokens,
     }
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "TCP-optimization/1.0",
+    }
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
     req = urllib.request.Request(
