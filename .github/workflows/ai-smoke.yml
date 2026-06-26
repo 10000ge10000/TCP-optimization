@@ -10,7 +10,7 @@ on:
       timeout:
         description: "AI request timeout in seconds"
         required: false
-        default: "40"
+        default: "90"
 
 permissions:
   contents: read

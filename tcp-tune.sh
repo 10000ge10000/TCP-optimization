@@ -1180,7 +1180,26 @@ def post_chat(model, messages, max_tokens=256):
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"]
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("missing response choices")
+    choice = choices[0]
+    message = choice.get("message") or {}
+    content = message.get("content")
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        content = "".join(parts)
+    if content is None:
+        content = choice.get("text") or data.get("output_text") or message.get("reasoning_content")
+    if content is None:
+        keys = ",".join(sorted(message.keys() or choice.keys()))
+        raise RuntimeError("missing response content: " + keys)
+    return str(content)
 
 def extract_json(text):
     text = text.strip()

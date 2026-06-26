@@ -204,6 +204,12 @@ GitHub Actions 中使用：
 
 注意：GitHub 的 Secrets/Variables 只会注入到 GitHub Actions 运行环境，不会自动出现在 VPS、OpenWrt 或用户本机。通过 `curl | sh`、SSH、本地脚本运行 AI 模式时，仍需要在那台机器上设置 `NVIDIA_API_KEY` 环境变量。
 
+部分模型首包较慢，Actions 的 `timeout` 输入默认使用 90 秒。手动运行时也可以按需设置：
+
+```sh
+TCP_TUNE_AI_TIMEOUT=90 sh tcp-tune.sh ai-benchmark-models
+```
+
 确定性适配命令：
 
 ```sh
