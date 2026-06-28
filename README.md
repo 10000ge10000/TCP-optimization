@@ -9,9 +9,18 @@ TCP-optimization 是一个双端 TCP 调优脚本，用来在 VPS 和客户端�
 - OpenWrt 不强制安装 Python，AI 功能可通过 curl 调用公共 AI 网关。
 - 所有修改都有备份，退出时会清理临时 Agent 和 iperf3。
 
-<p align="center">
-  <img src="client-dashboard.png" alt="TCP-optimization client dashboard" width="760">
-</p>
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>服务端监控</strong><br>
+      <img src="server-dashboard.png" alt="TCP-optimization server dashboard" width="100%">
+    </td>
+    <td width="50%" align="center">
+      <strong>客户端面板</strong><br>
+      <img src="client-dashboard.png" alt="TCP-optimization client dashboard" width="100%">
+    </td>
+  </tr>
+</table>
 
 ## 特性
 
