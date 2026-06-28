@@ -16,6 +16,8 @@ NVIDIA_BASE_URL="${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}"
 NVIDIA_MODEL="${NVIDIA_MODEL:-auto}"
 TCP_TUNE_AI_TIMEOUT="${TCP_TUNE_AI_TIMEOUT:-20}"
 TCP_TUNE_AI_MAX_ROUNDS="${TCP_TUNE_AI_MAX_ROUNDS:-5}"
+TCP_TUNE_AI_RETRIES="${TCP_TUNE_AI_RETRIES:-4}"
+TCP_TUNE_AI_CURL_IP_FAMILY="${TCP_TUNE_AI_CURL_IP_FAMILY:--4}"
 TCP_TUNE_AI_GATEWAY_URL="${TCP_TUNE_AI_GATEWAY_URL:-}"
 TCP_TUNE_AI_GATEWAY_TOKEN="${TCP_TUNE_AI_GATEWAY_TOKEN:-}"
 TCP_TUNE_DEFAULT_AI_GATEWAY_URL="${TCP_TUNE_DEFAULT_AI_GATEWAY_URL:-https://tcp-optimization-ai-gateway.10454728.workers.dev/v1}"
@@ -243,6 +245,26 @@ warn() {
 
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+is_integer() {
+  value="${1:-}"
+  [ -n "$value" ] || return 1
+  case "$value" in
+    -*) value="${value#-}" ;;
+  esac
+  [ -n "$value" ] || return 1
+  case "$value" in
+    *[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+is_unsigned_integer() {
+  case "${1:-}" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  return 0
 }
 
 is_positive_number() {
@@ -884,17 +906,21 @@ apply_buffers() {
   if [ "$#" -ge 9 ]; then
     limit_output="$9"
   else
-    limit_output=$((notsent_lowat * 2))
-    [ "$limit_output" -lt 131072 ] && limit_output=131072
-    [ "$limit_output" -gt 1048576 ] && limit_output=1048576
+    limit_output="$(awk -v n="$notsent_lowat" 'BEGIN {
+      v = int(n * 2)
+      if (v < 131072) v = 131072
+      if (v > 1048576) v = 1048576
+      printf "%d\n", v
+    }')"
   fi
   qdisc="$(preferred_qdisc)"
   case "$rmem_max$wmem_max" in
     *[!0-9]*) die "buffer 参数必须是数字。" ;;
   esac
-  case "$adv_win_scale$notsent_lowat$backlog$somaxconn$synbacklog$optmem$limit_output" in
-    *[!0-9]*) die "扩展 TCP 参数必须是数字。" ;;
-  esac
+  is_integer "$adv_win_scale" || die "tcp_adv_win_scale 必须是整数。"
+  for tcp_numeric in "$notsent_lowat" "$backlog" "$somaxconn" "$synbacklog" "$optmem" "$limit_output"; do
+    is_unsigned_integer "$tcp_numeric" || die "扩展 TCP 参数必须是数字。"
+  done
   if [ "${DRY_RUN:-0}" = "1" ]; then
     info "[dry-run] 将写入：rmem=$rmem_max wmem=$wmem_max adv=$adv_win_scale notsent=$notsent_lowat limit_output=$limit_output"
     return 0
@@ -1143,8 +1169,305 @@ vps_adapt_profile() {
   esac
 }
 
+json_escape_string() {
+  awk '
+    BEGIN { first = 1 }
+    {
+      gsub(/\\/,"\\\\")
+      gsub(/"/,"\\\"")
+      gsub(/\r/,"")
+      if (!first) printf "\\n"
+      printf "%s", $0
+      first = 0
+    }
+  '
+}
+
+ai_content_from_response() {
+  awk '
+    BEGIN { key="\"content\""; in_string=0; escaped=0; found=0; out="" }
+    {
+      text = text $0 "\n"
+    }
+    END {
+      pos = index(text, key)
+      if (!pos) exit 1
+      text = substr(text, pos + length(key))
+      colon = index(text, ":")
+      if (!colon) exit 1
+      text = substr(text, colon + 1)
+      start = index(text, "\"")
+      if (!start) exit 1
+      text = substr(text, start + 1)
+      for (i = 1; i <= length(text); i++) {
+        ch = substr(text, i, 1)
+        if (escaped) {
+          if (ch == "n") out = out "\n"
+          else if (ch == "r") out = out "\r"
+          else if (ch == "t") out = out "\t"
+          else out = out ch
+          escaped = 0
+        } else if (ch == "\\") {
+          escaped = 1
+        } else if (ch == "\"") {
+          print out
+          exit 0
+        } else {
+          out = out ch
+        }
+      }
+      exit 1
+    }
+  '
+}
+
+extract_json_object_text() {
+  awk '
+    BEGIN { depth=0; started=0; in_string=0; escaped=0; out="" }
+    {
+      text = text $0 "\n"
+    }
+    END {
+      for (i = 1; i <= length(text); i++) {
+        ch = substr(text, i, 1)
+        if (!started) {
+          if (ch == "{") {
+            started = 1
+            depth = 1
+            out = ch
+          }
+          continue
+        }
+        out = out ch
+        if (escaped) {
+          escaped = 0
+          continue
+        }
+        if (ch == "\\") {
+          escaped = 1
+          continue
+        }
+        if (ch == "\"") {
+          in_string = !in_string
+          continue
+        }
+        if (!in_string && ch == "{") depth++
+        if (!in_string && ch == "}") {
+          depth--
+          if (depth == 0) {
+            print out
+            exit 0
+          }
+        }
+      }
+      exit 1
+    }
+  '
+}
+
+json_number_field() {
+  field="$1"
+  default="$2"
+  awk -v field="\"$field\"" -v default="$default" '
+    BEGIN { value = default }
+    {
+      pos = index($0, field)
+      if (pos) {
+        rest = substr($0, pos + length(field))
+        sub(/^[^:]*:/, "", rest)
+        if (match(rest, /-?[0-9]+/)) value = substr(rest, RSTART, RLENGTH)
+      }
+    }
+    END { print value }
+  '
+}
+
+json_string_field() {
+  field="$1"
+  default="$2"
+  awk -v field="\"$field\"" -v default="$default" '
+    BEGIN { value = default }
+    {
+      pos = index($0, field)
+      if (pos) {
+        rest = substr($0, pos + length(field))
+        sub(/^[^:]*:[[:space:]]*"/, "", rest)
+        end = index(rest, "\"")
+        if (end > 0) value = substr(rest, 1, end - 1)
+      }
+    }
+    END { print value }
+  '
+}
+
+clamp_int() {
+  value="$1"
+  default="$2"
+  min="$3"
+  max="$4"
+  is_integer "$value" || value="$default"
+  awk -v value="$value" -v min="$min" -v max="$max" 'BEGIN {
+    if (value < min) value = min
+    if (value > max) value = max
+    printf "%d\n", value
+  }'
+}
+
+ai_curl_post_chat() {
+  model="$1"
+  prompt="$2"
+  max_tokens="${3:-256}"
+  base_url="${TCP_TUNE_AI_GATEWAY_URL:-$NVIDIA_BASE_URL}"
+  base_url="${base_url%/}"
+  escaped_prompt="$(printf '%s' "$prompt" | json_escape_string)"
+  body="$(cat <<EOF
+{"model":"$model","messages":[{"role":"user","content":"$escaped_prompt"}],"temperature":0,"max_tokens":$max_tokens}
+EOF
+)"
+  auth_header=""
+  if [ -n "${NVIDIA_API_KEY:-}" ]; then
+    auth_header="Authorization: Bearer $NVIDIA_API_KEY"
+  elif [ -n "${TCP_TUNE_AI_GATEWAY_TOKEN:-}" ]; then
+    auth_header="Authorization: Bearer $TCP_TUNE_AI_GATEWAY_TOKEN"
+  fi
+  curl_ip_arg=""
+  case "${TCP_TUNE_AI_CURL_IP_FAMILY:-}" in
+    -4|--ipv4) curl_ip_arg="-4" ;;
+    -6|--ipv6) curl_ip_arg="-6" ;;
+    *) curl_ip_arg="" ;;
+  esac
+  attempt=1
+  max_attempts="$TCP_TUNE_AI_RETRIES"
+  is_unsigned_integer "$max_attempts" || max_attempts=4
+  [ "$max_attempts" -lt 1 ] && max_attempts=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if [ -n "$auth_header" ]; then
+      curl -fsS $curl_ip_arg --connect-timeout 10 --retry 1 --retry-delay 1 --max-time "$TCP_TUNE_AI_TIMEOUT" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -H "User-Agent: TCP-optimization/1.0" \
+        -H "$auth_header" \
+        -d "$body" \
+        "$base_url/chat/completions" && return 0
+    else
+      curl -fsS $curl_ip_arg --connect-timeout 10 --retry 1 --retry-delay 1 --max-time "$TCP_TUNE_AI_TIMEOUT" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -H "User-Agent: TCP-optimization/1.0" \
+        -d "$body" \
+        "$base_url/chat/completions" && return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
+ai_curl_client() {
+  mode="$1"
+  shift || true
+  have_cmd curl || die "AI 模式需要 curl。"
+  case "$mode" in
+    benchmark)
+      models="$*"
+      best_model=""
+      best_ms=""
+      for model in $models; do
+        start="$(date +%s 2>/dev/null || echo 0)"
+        if response="$(ai_curl_post_chat "$model" "Return only OK." 16 2>&1)"; then
+          end="$(date +%s 2>/dev/null || echo "$start")"
+          elapsed=$((end - start))
+          printf '%s\tOK\t%ss\n' "$model" "$elapsed"
+          if [ -z "$best_ms" ] || [ "$elapsed" -lt "$best_ms" ]; then
+            best_ms="$elapsed"
+            best_model="$model"
+          fi
+        else
+          printf '%s\tFAIL\t%s\n' "$model" "$(printf '%s' "$response" | head -n 1 | cut -c 1-120)"
+        fi
+      done
+      [ -n "$best_model" ] || return 2
+      printf 'BEST\t%s\n' "$best_model"
+      ;;
+    select)
+      configured="${NVIDIA_MODEL:-auto}"
+      if [ -n "$configured" ] && [ "$configured" != "auto" ]; then
+        echo "$configured"
+        return 0
+      fi
+      models="$*"
+      for model in $models; do
+        if ai_curl_post_chat "$model" "Return only OK." 16 >/dev/null 2>&1; then
+          echo "$model"
+          return 0
+        fi
+      done
+      return 2
+      ;;
+    decide)
+      model="$1"
+      objective="$2"
+      role="$3"
+      summary="$(cat)"
+      prompt="$(cat <<EOF
+You are a conservative TCP tuning controller. Return only one JSON object. Do not include shell commands.
+Allowed congestion values: cubic,bbr,reno.
+Allowed integer fields: mtu_probing 0/1, slow_start_after_idle 0/1, rmem_max,wmem_max between 1048576 and 268435456, notsent_lowat between 16384 and 4294967295, limit_output_bytes between 131072 and 4194304.
+OpenWrt may only use minimal=true plus mtu_probing, slow_start_after_idle, notsent_lowat, limit_output_bytes.
+Objective: $objective
+Role: $role
+Prefer VPS-side adaptation. For high VPS->OpenWrt retransmits with good throughput, prefer cubic-safe. For OpenWrt upload bottlenecks that remain low across tests, do not over-increase buffers.
+Return JSON shape: {"vps":{"congestion":"cubic","mtu_probing":1,"slow_start_after_idle":0,"rmem_max":67108864,"wmem_max":67108864,"notsent_lowat":4294967295,"limit_output_bytes":1048576},"openwrt":{"minimal":true,"mtu_probing":1,"slow_start_after_idle":0,"notsent_lowat":4294967295,"limit_output_bytes":1048576},"reason":"short Chinese reason"}.
+Summary JSON:
+$summary
+EOF
+)"
+      response="$(ai_curl_post_chat "$model" "$prompt" 512)"
+      content="$(printf '%s' "$response" | ai_content_from_response)"
+      printf '%s' "$content" | extract_json_object_text
+      ;;
+    normalize)
+      role="$1"
+      raw="$(cat)"
+      congestion="$(printf '%s' "$raw" | json_string_field congestion cubic)"
+      case "$congestion" in cubic|bbr|reno) ;; *) congestion="cubic" ;; esac
+      vps_mtu="$(clamp_int "$(printf '%s' "$raw" | json_number_field mtu_probing 1)" 1 0 1)"
+      vps_slow="$(clamp_int "$(printf '%s' "$raw" | json_number_field slow_start_after_idle 0)" 0 0 1)"
+      vps_rmem="$(clamp_int "$(printf '%s' "$raw" | json_number_field rmem_max 67108864)" 67108864 1048576 268435456)"
+      vps_wmem="$(clamp_int "$(printf '%s' "$raw" | json_number_field wmem_max 67108864)" 67108864 1048576 268435456)"
+      vps_notsent="$(clamp_int "$(printf '%s' "$raw" | json_number_field notsent_lowat 4294967295)" 4294967295 16384 4294967295)"
+      vps_limit="$(clamp_int "$(printf '%s' "$raw" | json_number_field limit_output_bytes 1048576)" 1048576 131072 4194304)"
+      reason="$(printf '%s' "$raw" | json_string_field reason 未提供 | tr "'" " " | cut -c 1-160)"
+      case "$role" in
+        vps)
+          printf "vps_congestion='%s'\n" "$congestion"
+          printf "vps_mtu_probing='%s'\n" "$vps_mtu"
+          printf "vps_slow_start='%s'\n" "$vps_slow"
+          printf "vps_rmem_max='%s'\n" "$vps_rmem"
+          printf "vps_wmem_max='%s'\n" "$vps_wmem"
+          printf "vps_notsent='%s'\n" "$vps_notsent"
+          printf "vps_limit='%s'\n" "$vps_limit"
+          printf "ai_reason='%s'\n" "$reason"
+          ;;
+        openwrt)
+          printf "op_minimal='1'\n"
+          printf "op_mtu_probing='%s'\n" "$vps_mtu"
+          printf "op_slow_start='%s'\n" "$vps_slow"
+          printf "op_notsent='%s'\n" "$vps_notsent"
+          printf "op_limit='%s'\n" "$vps_limit"
+          printf "ai_reason='%s'\n" "$reason"
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 ai_require_env() {
-  have_cmd python3 || die "AI 模式需要 python3。"
+  if ! have_cmd python3 && ! have_cmd curl; then
+    die "AI 模式需要 curl；有 python3 时会使用更完整的解析路径。"
+  fi
   if [ -z "${NVIDIA_API_KEY:-}" ] && [ -z "${TCP_TUNE_AI_GATEWAY_URL:-}" ]; then
     die "缺少 NVIDIA_API_KEY 或 TCP_TUNE_AI_GATEWAY_URL。请通过环境变量提供，不要把真实 Key 写入脚本或仓库。"
   fi
@@ -1154,6 +1477,10 @@ ai_python_client() {
   mode="$1"
   shift || true
   export NVIDIA_BASE_URL NVIDIA_MODEL TCP_TUNE_AI_TIMEOUT TCP_TUNE_AI_GATEWAY_URL TCP_TUNE_AI_GATEWAY_TOKEN
+  if ! have_cmd python3; then
+    ai_curl_client "$mode" "$@"
+    return "$?"
+  fi
   tmp_py="${TMPDIR:-/tmp}/tcp-tune-ai-$$.py"
   cat > "$tmp_py" <<'PY'
 import json
@@ -1492,16 +1819,16 @@ ai_auto_mode() {
   seconds="12"
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --peer|--host) host="$2"; shift 2 ;;
-      --port|--iperf-port) port="$2"; shift 2 ;;
-      --objective) objective="$2"; shift 2 ;;
-      --rounds) rounds="$2"; shift 2 ;;
-      --role) role="$2"; shift 2 ;;
-      --seconds) seconds="$2"; shift 2 ;;
-      *) die "未知 ai-auto 参数：$1" ;;
+      --peer|--host|--对端|--主机) host="$2"; shift 2 ;;
+      --port|--iperf-port|--端口|--测速端口) port="$2"; shift 2 ;;
+      --objective|--目标) objective="$2"; shift 2 ;;
+      --rounds|--轮数) rounds="$2"; shift 2 ;;
+      --role|--角色) role="$2"; shift 2 ;;
+      --seconds|--时长) seconds="$2"; shift 2 ;;
+      *) die "未知 AI自动优化 参数：$1" ;;
     esac
   done
-  [ -n "$host" ] || die "ai-auto 需要 --peer"
+  [ -n "$host" ] || die "AI自动优化 需要 --对端"
   case "$objective" in balanced|throughput|retrans) ;; *) die "--objective 只支持 balanced、throughput、retrans" ;; esac
   validate_positive_int_range "$rounds" 1 "$TCP_TUNE_AI_MAX_ROUNDS" || die "--rounds 必须在 1 和 $TCP_TUNE_AI_MAX_ROUNDS 之间。"
   validate_positive_int_range "$seconds" 5 60 || die "--seconds 必须在 5 和 60 之间。"
@@ -1565,13 +1892,13 @@ ai_diagnose_mode() {
   role="vps"
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --summary) summary_file="$2"; shift 2 ;;
-      --objective) objective="$2"; shift 2 ;;
-      --role) role="$2"; shift 2 ;;
-      *) die "未知 ai-diagnose 参数：$1" ;;
+      --summary|--摘要) summary_file="$2"; shift 2 ;;
+      --objective|--目标) objective="$2"; shift 2 ;;
+      --role|--角色) role="$2"; shift 2 ;;
+      *) die "未知 AI诊断 参数：$1" ;;
     esac
   done
-  [ -n "$summary_file" ] || die "ai-diagnose 需要 --summary FILE"
+  [ -n "$summary_file" ] || die "AI诊断 需要 --摘要 FILE"
   [ -f "$summary_file" ] || die "summary 文件不存在：$summary_file"
   ai_require_env
   detect_os
@@ -1642,6 +1969,16 @@ public_ip() {
 }
 
 local_lan_ipv4() {
+  if [ "${OS_FAMILY:-}" = "openwrt" ] || [ -f /etc/openwrt_release ]; then
+    found_lan_ip=""
+    if have_cmd ip; then
+      found_lan_ip="$(for dev in br-lan lan eth0 eth1; do ip -4 addr show dev "$dev" 2>/dev/null; done | awk '/inet / {split($2,a,"/"); if (a[1] !~ /^127[.]/ && a[1] !~ /^169[.]254[.]/) {print a[1]; exit}}')"
+    fi
+    if [ -n "$found_lan_ip" ]; then
+      echo "$found_lan_ip"
+      return 0
+    fi
+  fi
   if have_cmd ip; then
     ip -4 route get 1.1.1.1 2>/dev/null | awk '
       {
@@ -1868,6 +2205,10 @@ tune_step() {
   cur_wmem="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 4194304)"
   cur_notsent="$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo 131072)"
   cur_adv="$(sysctl -n net.ipv4.tcp_adv_win_scale 2>/dev/null || echo 2)"
+  is_unsigned_integer "$cur_rmem" || cur_rmem=4194304
+  is_unsigned_integer "$cur_wmem" || cur_wmem=4194304
+  is_unsigned_integer "$cur_notsent" || cur_notsent=131072
+  is_integer "$cur_adv" || cur_adv=2
 
   values="$(recommend_values "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$objective" "$ramp_rate" "$aggressive")"
   case "$values" in
@@ -1877,6 +2218,10 @@ tune_step() {
   set -- $values
   rmem="$1"; wmem="$2"; adv="$3"; notsent="$4"
   backlog="$5"; somaxconn="$6"; synbacklog="$7"; optmem="$8"
+  is_unsigned_integer "$backlog" || backlog=16384
+  is_unsigned_integer "$somaxconn" || somaxconn=8192
+  is_unsigned_integer "$synbacklog" || synbacklog=32768
+  is_unsigned_integer "$optmem" || optmem=81920
 
   rmem="$cur_rmem"
   wmem="$cur_wmem"
@@ -1939,16 +2284,10 @@ auto_tune() {
   ramp_rate="0.79"
   aggressive="0"
   allow_same_public="0"
-  if [ "$#" -ge 10 ]; then
-    shift 9
-    memory_mb_value="${1:-}"
-    [ "$#" -gt 0 ] && shift
-    ramp_rate="${1:-0.79}"
-    [ "$#" -gt 0 ] && shift
-    aggressive="${1:-0}"
-    [ "$#" -gt 0 ] && shift
-    allow_same_public="${1:-0}"
-  fi
+  [ "$#" -ge 10 ] && eval "memory_mb_value=\${10:-}"
+  [ "$#" -ge 11 ] && eval "ramp_rate=\${11:-0.79}"
+  [ "$#" -ge 12 ] && eval "aggressive=\${12:-0}"
+  [ "$#" -ge 13 ] && eval "allow_same_public=\${13:-0}"
 
   need_root
   install_runtime_deps
@@ -2239,6 +2578,7 @@ import http.server
 import json
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -2408,9 +2748,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         write_json(self, 404, {"ok": False, "error": "not found"})
 
+class DualStackThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            pass
+        super().server_bind()
+
 if __name__ == "__main__":
     port = int(os.environ.get("TCP_TUNE_AGENT_PORT", "39188"))
-    http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    try:
+        DualStackThreadingHTTPServer(("::", port), Handler).serve_forever()
+    except OSError:
+        http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 PY
   chmod +x "$path"
 }
@@ -2427,7 +2780,7 @@ listen_mode() {
       peer_url="http://<公网IP>:$AGENT_PORT"
     fi
     token="<启动后自动生成>"
-    echo "[dry-run] 将启动临时 HTTP Agent：0.0.0.0:$AGENT_PORT"
+    echo "[dry-run] 将启动临时 HTTP Agent：[::]:$AGENT_PORT（失败时回退 0.0.0.0）"
     echo "[dry-run] 将启动 iperf3 server：0.0.0.0:$IPERF_PORT"
     echo "[dry-run] 会话 TTL：$SESSION_TTL 秒"
     print_client_commands "$peer_url" "$token"
@@ -2742,7 +3095,15 @@ join_mode() {
   report="{\"role\":\"$report_role\",\"os\":\"$OS_NAME\",\"family\":\"$OS_FAMILY\",\"lan_ip\":\"$client_lan_ip\",\"time\":$(date +%s)}"
   post_json "$peer/report" "$token" "$report" >/dev/null || warn "无法向对端上报状态，但将继续本地测试。"
 
-  host="$(printf '%s\n' "$peer" | sed 's#^http://##; s#^https://##; s#:.*##; s#/.*##')"
+  peer_no_scheme="$(printf '%s\n' "$peer" | sed 's#^http://##; s#^https://##')"
+  case "$peer_no_scheme" in
+    \[*\]*)
+      host="$(printf '%s\n' "$peer_no_scheme" | sed 's#^\[\([^]]*\)\].*#\1#')"
+      ;;
+    *)
+      host="$(printf '%s\n' "$peer_no_scheme" | sed 's#:.*##; s#/.*##')"
+      ;;
+  esac
   echo "已连接到服务端会话。"
   if [ "${CLIENT_MENU:-0}" = "1" ]; then
     client_menu "$peer" "$token" "$host" "$iperf_port" "$allow_same_public" "$client_lan_ip"
@@ -2779,6 +3140,7 @@ run_client_optimization() {
   ui_menu_item "2" "上传" "本机 → 服务端"
   echo
   ui_note "当前选择" "$selected_label · 默认下载方向"
+  ui_note "AI 说明" "此菜单使用确定性自动调参；AI 只在 AI自动优化 / AI测速 / AI诊断 命令中介入。"
   if ! prompt_read "请选择测试方向 [1-2]："; then return 1; fi
   case "$PROMPT_REPLY" in
     2) reverse="0" ;;
@@ -2800,7 +3162,7 @@ client_menu() {
     echo
     ui_section "操作菜单"
     ui_menu_group "优化"
-    ui_menu_item "1" "开始优化" "重传 / 吞吐 / 快速起速" "$COLOR_GREEN"
+    ui_menu_item "1" "开始优化" "确定性调参：重传 / 吞吐 / 快速起速" "$COLOR_GREEN"
     echo
     ui_menu_group "状态"
     ui_menu_item "2" "查看本机状态" "系统 / TCP 参数"
@@ -2953,9 +3315,9 @@ $APP_NAME $APP_VERSION
   sh tcp-tune.sh apply-profile 近距极速
   sh tcp-tune.sh apply-buffers RMEM_MAX WMEM_MAX
   sh tcp-tune.sh auto --host IP --direction download --objective retrans --target-retr 0 --rtt-ms 100
-  sh tcp-tune.sh ai-auto --peer IPV6 --objective balanced --rounds 5
-  sh tcp-tune.sh ai-benchmark-models
-  sh tcp-tune.sh ai-diagnose --summary SUMMARY.json
+  sh tcp-tune.sh AI测速
+  sh tcp-tune.sh AI自动优化 --对端 IPV6 --目标 balanced --轮数 5
+  sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
   sh tcp-tune.sh local-minimal --ipv6-peer IPV6
   sh tcp-tune.sh vps-adapt --peer-ipv6 IPV6 --profile cubic-safe
   sh tcp-tune.sh rollback
@@ -3027,13 +3389,14 @@ main() {
       fi
       ;;
     rollback) rollback_last ;;
-    ai-benchmark-models)
+    # 中文 AI 命令是面向普通用户的主入口；英文命令保留给旧文档和自动化脚本。
+    AI测速|ai-benchmark-models)
       ai_benchmark_models
       ;;
-    ai-diagnose)
+    AI诊断|ai-diagnose)
       ai_diagnose_mode "$@"
       ;;
-    ai-auto)
+    AI自动优化|ai-auto)
       ai_auto_mode "$@"
       ;;
     local-minimal)

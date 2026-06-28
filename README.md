@@ -93,6 +93,18 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 
 AI 模式不是让模型执行 shell 命令。模型只能返回结构化 JSON，脚本再按白名单和上下限校验后落地。
 
+普通客户端菜单里的“开始优化”是确定性自动调参，不会调用 AI。AI 只在下面这些命令中介入：
+
+```sh
+sh tcp-tune.sh AI测速
+sudo sh tcp-tune.sh AI自动优化 --对端 2406:xxxx:xxxx::1 --目标 balanced --轮数 5
+sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
+```
+
+OpenWrt 不需要安装 `python3` 才能使用公共 AI 网关；没有 `python3` 时脚本会自动使用 `curl` 走轻量路径。VPS 服务端模式仍需要 `python3`，因为临时 HTTP Agent 由 Python 标准库提供。
+
+英文旧命令仍然兼容：`ai-benchmark-models`、`ai-auto`、`ai-diagnose`。新文档统一使用中文命令，普通用户更容易看懂。
+
 支持的默认候选模型：
 
 ```text
@@ -105,19 +117,19 @@ z-ai/glm-5.1
 本机运行：
 
 ```sh
-sh tcp-tune.sh ai-benchmark-models
+sh tcp-tune.sh AI测速
 ```
 
 AI 自动调参：
 
 ```sh
-sudo sh tcp-tune.sh ai-auto --peer 2406:xxxx:xxxx::1 --objective balanced --rounds 5
+sudo sh tcp-tune.sh AI自动优化 --对端 2406:xxxx:xxxx::1 --目标 balanced --轮数 5
 ```
 
 如果模型首包慢，可以加大超时：
 
 ```sh
-TCP_TUNE_AI_TIMEOUT=90 sh tcp-tune.sh ai-benchmark-models
+TCP_TUNE_AI_TIMEOUT=90 sh tcp-tune.sh AI测速
 ```
 
 GitHub Actions 测试：
@@ -150,7 +162,7 @@ https://tcp-optimization-ai-gateway.10454728.workers.dev/v1
 
 ```sh
 export TCP_TUNE_AI_GATEWAY_URL="https://你的网关域名/v1"
-sh tcp-tune.sh ai-benchmark-models
+sh tcp-tune.sh AI测速
 ```
 
 如果你的网关还需要访问令牌：
@@ -158,14 +170,14 @@ sh tcp-tune.sh ai-benchmark-models
 ```sh
 export TCP_TUNE_AI_GATEWAY_URL="https://你的网关域名/v1"
 export TCP_TUNE_AI_GATEWAY_TOKEN="网关令牌"
-sh tcp-tune.sh ai-benchmark-models
+sh tcp-tune.sh AI测速
 ```
 
 如果你想绕过公共网关，也可以自己提供 NVIDIA Key：
 
 ```sh
 export NVIDIA_API_KEY="你的 NVIDIA API Key"
-sh tcp-tune.sh ai-benchmark-models
+sh tcp-tune.sh AI测速
 ```
 
 GitHub Secret 只给 GitHub Actions 用，不会自动下发给所有运行脚本的用户。
