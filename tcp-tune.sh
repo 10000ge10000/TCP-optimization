@@ -3150,6 +3150,51 @@ run_client_optimization() {
   auto_tune "$host" "$iperf_port" "$objective" "$target_retr" "$rounds" "$reverse" 0 0 100 "" 0.79 0 "$allow_same_public"
 }
 
+run_client_ai_optimization() {
+  host="$1"
+  iperf_port="$2"
+  clear_screen
+  print_header "AI 智能调参"
+  ui_subtitle "先真实测速，再让 AI 给出白名单内的参数调整，写入后会自动复测。"
+  echo
+  ui_section "AI 调参目标"
+  ui_mode_card "1" "均衡优先" "适合多数场景。" "兼顾速度、重传和稳定性"
+  ui_mode_card "2" "吞吐优先" "适合下载、备份、大文件。" "优先提高稳定传输速度"
+  ui_mode_card "3" "重传优先" "适合游戏、语音、远程桌面。" "优先压低重传"
+  echo
+  if ! prompt_read "请选择 AI 调参目标 [1-3]："; then return 1; fi
+  case "$PROMPT_REPLY" in
+    2) objective="throughput" ;;
+    3) objective="retrans" ;;
+    *) objective="balanced" ;;
+  esac
+
+  echo
+  ui_section "测试轮数"
+  ui_note "建议" "OpenWrt 建议先用 2 轮，确认稳定后再增加轮数。"
+  if ! prompt_read "请输入 AI 调参轮数 [1-${TCP_TUNE_AI_MAX_ROUNDS}]，默认 2："; then return 1; fi
+  rounds="$PROMPT_REPLY"
+  [ -n "$rounds" ] || rounds="2"
+  validate_positive_int_range "$rounds" 1 "$TCP_TUNE_AI_MAX_ROUNDS" || {
+    warn "轮数无效，已使用默认 2。"
+    rounds="2"
+  }
+
+  echo
+  ui_section "安全说明"
+  ui_note "执行范围" "AI 只能返回结构化建议，脚本只执行内置白名单参数。"
+  ui_note "OpenWrt" "本机只做最小必要调整，不修改防火墙、DNS、代理或网络服务。"
+  ui_note "依赖" "OpenWrt 不需要 python3；没有 python3 时会自动使用 curl 调用 AI 网关。"
+  echo
+  if ! prompt_read "按回车开始 AI 智能调参，输入 n 取消："; then return 1; fi
+  case "$PROMPT_REPLY" in
+    n|N) return 0 ;;
+  esac
+
+  # 这里复用命令行 AI 自动优化入口，避免面板和命令行维护两套调参逻辑。
+  ai_auto_mode --对端 "$host" --端口 "$iperf_port" --目标 "$objective" --轮数 "$rounds" --角色 auto
+}
+
 client_menu() {
   peer="$1"
   token="$2"
@@ -3163,14 +3208,15 @@ client_menu() {
     ui_section "操作菜单"
     ui_menu_group "优化"
     ui_menu_item "1" "开始优化" "确定性调参：重传 / 吞吐 / 快速起速" "$COLOR_GREEN"
+    ui_menu_item "2" "AI 智能调参" "AI 辅助：均衡 / 吞吐 / 重传" "$COLOR_CYAN"
     echo
     ui_menu_group "状态"
-    ui_menu_item "2" "查看本机状态" "系统 / TCP 参数"
-    ui_menu_item "3" "查看服务端状态" "会话 / 测速服务"
-    ui_menu_item "4" "查看过程记录" "任务 / 结果"
+    ui_menu_item "3" "查看本机状态" "系统 / TCP 参数"
+    ui_menu_item "4" "查看服务端状态" "会话 / 测速服务"
+    ui_menu_item "5" "查看过程记录" "任务 / 结果"
     echo
     ui_menu_group "退出"
-    ui_menu_item "5" "停止会话并退出" "清理 Agent / iperf3" "$COLOR_YELLOW"
+    ui_menu_item "6" "停止会话并退出" "清理 Agent / iperf3" "$COLOR_YELLOW"
     ui_menu_item "0" "退出客户端" "不停止服务端会话" "$COLOR_DIM"
     echo
     if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
@@ -3180,10 +3226,11 @@ client_menu() {
     ans="$PROMPT_REPLY"
     case "$ans" in
       1) run_client_optimization "$host" "$iperf_port" "$allow_same_public"; pause_for_enter ;;
-      2) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
-      3) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
-      4) clear_screen; print_header "过程记录"; get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
-      5) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
+      2) run_client_ai_optimization "$host" "$iperf_port"; pause_for_enter ;;
+      3) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
+      4) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
+      5) clear_screen; print_header "过程记录"; get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
+      6) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
       0) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac

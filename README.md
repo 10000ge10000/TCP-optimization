@@ -72,10 +72,11 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 
 ```text
 1. 开始优化
-2. 查看本机状态
-3. 查看服务端状态
-4. 查看过程记录
-5. 停止双方会话并退出
+2. AI 智能调参
+3. 查看本机状态
+4. 查看服务端状态
+5. 查看过程记录
+6. 停止双方会话并退出
 0. 退出客户端
 ```
 
@@ -93,7 +94,7 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 
 AI 模式不是让模型执行 shell 命令。模型只能返回结构化 JSON，脚本再按白名单和上下限校验后落地。
 
-普通客户端菜单里的“开始优化”是确定性自动调参，不会调用 AI。AI 只在下面这些命令中介入：
+客户端菜单里的“开始优化”是确定性自动调参，不会调用 AI。面板中的“AI 智能调参”会调用 AI；命令行也可以直接使用下面这些 AI 命令：
 
 ```sh
 sh tcp-tune.sh AI测速
