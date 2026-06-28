@@ -61,6 +61,8 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 .\tcp-tune.ps1 client -Peer http://SERVER:39188 -Token TOKEN -IperfPort 5201 -Direction download -Yes
 ```
 
+Windows 无 winget/choco/scoop 时，脚本会把 iperf3 下载到用户缓存目录，不写系统目录。
+
 ## 客户端菜单
 
 ```text

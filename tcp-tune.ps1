@@ -17,6 +17,10 @@
 
 $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/10000ge10000/TCP-optimization"
+$ToolRoot = Join-Path $env:LOCALAPPDATA "TCP-optimization"
+$IperfCacheDir = Join-Path $ToolRoot "iperf3"
+$DefaultAiGatewayUrl = "https://tcp-optimization-ai-gateway.10454728.workers.dev/v1"
+$AiModelCandidates = @("minimaxai/minimax-m3", "moonshotai/kimi-k2.6", "minimaxai/minimax-m2.7", "z-ai/glm-5.1")
 
 # 显示宽度感知的 padding：中文字符占 2 列，ASCII 占 1 列
 function Format-Pad {
@@ -110,6 +114,19 @@ function Write-MenuItem {
   Write-Host "  $Description" -ForegroundColor DarkGray
 }
 
+function Repair-DisplayText {
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  if ($Text -match "[ÃÂäåæçèé]") {
+    try {
+      return [System.Text.Encoding]::UTF8.GetString([System.Text.Encoding]::GetEncoding(28591).GetBytes($Text))
+    } catch {
+      return $Text
+    }
+  }
+  return $Text
+}
+
 function Get-PercentDelta {
   param([double]$Before, [double]$After)
   if ($Before -le 0) { return "建立基线" }
@@ -154,11 +171,37 @@ function Install-Iperf3 {
     scoop install iperf3
     return
   }
-  throw "缺少 iperf3，且未找到 winget、choco 或 scoop。请先安装 iperf3 并加入 PATH。"
+
+  Write-Host "未找到 winget/choco/scoop，改用用户目录下载 iperf3。" -ForegroundColor Yellow
+  New-Item -ItemType Directory -Force -Path $IperfCacheDir | Out-Null
+  $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ar51an/iperf3-win-builds/releases/latest" -Headers @{ "User-Agent" = "TCP-optimization" }
+  $asset = $release.assets |
+    Where-Object { $_.name -match 'win64\.zip$' -and $_.name -notmatch 'auth|win7' } |
+    Select-Object -First 1
+  if (-not $asset) {
+    throw "无法找到 Windows iperf3 下载包。"
+  }
+  $zipPath = Join-Path $IperfCacheDir $asset.name
+  $extractPath = Join-Path $IperfCacheDir "current"
+  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+  if (Test-Path $extractPath) { Remove-Item -LiteralPath $extractPath -Recurse -Force }
+  Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+  $exe = Get-ChildItem -LiteralPath $extractPath -Recurse -Filter iperf3.exe | Select-Object -First 1
+  if (-not $exe) {
+    throw "下载包中未找到 iperf3.exe。"
+  }
+  $env:PATH = "$($exe.Directory.FullName);$env:PATH"
+  Write-Host "iperf3 已安装到用户缓存：$($exe.FullName)" -ForegroundColor Green
 }
 
 function Ensure-Command {
   param([string]$Name)
+  if ($Name -eq "iperf3") {
+    $cached = Get-CachedIperf3
+    if ($cached) {
+      $env:PATH = "$((Split-Path -Parent $cached));$env:PATH"
+    }
+  }
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
     if ($Name -eq "iperf3" -and $Yes) {
       Install-Iperf3
@@ -167,6 +210,15 @@ function Ensure-Command {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
     throw "缺少命令：$Name。请安装 Windows 版 iperf3 并加入 PATH。"
   }
+}
+
+function Get-CachedIperf3 {
+  if (-not (Test-Path $IperfCacheDir)) { return $null }
+  $exe = Get-ChildItem -LiteralPath $IperfCacheDir -Recurse -Filter iperf3.exe -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+  if ($exe) { return $exe.FullName }
+  return $null
 }
 
 function Invoke-AgentPost {
@@ -212,6 +264,42 @@ function Get-LocalLanIPv4 {
     Select-Object -First 1
   if ($address) { return $address.IPAddressToString }
   return "未识别"
+}
+
+function Get-LocalLanIPv6 {
+  try {
+    $addr = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction Stop |
+      Where-Object {
+        $_.AddressState -eq "Preferred" -and
+        $_.IPAddress -ne "::1" -and
+        $_.IPAddress -notlike "fe80*" -and
+        $_.IPAddress -notlike "fd*" -and
+        $_.IPAddress -notlike "fc*"
+      } |
+      Sort-Object InterfaceMetric |
+      Select-Object -First 1
+    if ($addr -and $addr.IPAddress) { return [string]$addr.IPAddress }
+  } catch {
+    # Older Windows editions may not expose NetTCPIP cmdlets.
+  }
+  return "未识别"
+}
+
+function Test-IPv6Literal {
+  param([string]$HostName)
+  $ip = $null
+  if ([System.Net.IPAddress]::TryParse($HostName, [ref]$ip)) {
+    return $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6
+  }
+  return $false
+}
+
+function Get-LocalBindAddress {
+  param([string]$HostName)
+  if (Test-IPv6Literal -HostName $HostName) {
+    return Get-LocalLanIPv6
+  }
+  return Get-LocalLanIPv4
 }
 
 function Get-ObjectiveLabel {
@@ -278,6 +366,137 @@ function Get-IperfMetrics {
     FirstSecondBitsPerSecond = $firstSecondBits
     Retransmits = $retransmits
   }
+}
+
+function Invoke-AIChat {
+  param([string]$Model, [string]$Prompt, [int]$MaxTokens = 512)
+  $baseUrl = $env:TCP_TUNE_AI_GATEWAY_URL
+  if (-not $baseUrl) { $baseUrl = $DefaultAiGatewayUrl }
+  $baseUrl = $baseUrl.TrimEnd("/")
+  $headers = @{
+    "Content-Type" = "application/json"
+    "Accept" = "application/json"
+    "User-Agent" = "TCP-optimization/Windows"
+  }
+  if ($env:NVIDIA_API_KEY) {
+    $headers["Authorization"] = "Bearer $env:NVIDIA_API_KEY"
+  } elseif ($env:TCP_TUNE_AI_GATEWAY_TOKEN) {
+    $headers["Authorization"] = "Bearer $env:TCP_TUNE_AI_GATEWAY_TOKEN"
+  }
+  $body = @{
+    model = $Model
+    messages = @(@{ role = "user"; content = $Prompt })
+    temperature = 0
+    max_tokens = $MaxTokens
+  } | ConvertTo-Json -Depth 8
+  $timeout = 30
+  if ($env:TCP_TUNE_AI_TIMEOUT) { $timeout = [int]$env:TCP_TUNE_AI_TIMEOUT }
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+      $response = Invoke-RestMethod -Method Post -Uri "$baseUrl/chat/completions" -Headers $headers -Body $body -TimeoutSec $timeout
+      $content = $response.choices[0].message.content
+      if ($content -is [array]) {
+        $content = ($content | ForEach-Object {
+          if ($_.text) { $_.text } elseif ($_.content) { $_.content } else { "" }
+        }) -join ""
+      }
+      if ($content) { return [string]$content }
+    } catch {
+      if ($attempt -eq 3) { throw }
+      Start-Sleep -Seconds 1
+    }
+  }
+  throw "AI 没有返回内容。"
+}
+
+function Select-AIModel {
+  if ($env:NVIDIA_MODEL -and $env:NVIDIA_MODEL -ne "auto") { return $env:NVIDIA_MODEL }
+  foreach ($model in $AiModelCandidates) {
+    try {
+      $ok = Invoke-AIChat -Model $model -Prompt "Return only OK." -MaxTokens 16
+      if ($ok) { return $model }
+    } catch {
+      continue
+    }
+  }
+  throw "没有可用 AI 模型。"
+}
+
+function ConvertFrom-AIJson {
+  param([string]$Text)
+  $match = [regex]::Match($Text, "\{[\s\S]*\}")
+  if (-not $match.Success) { throw "AI 未返回 JSON。" }
+  return ($match.Value | ConvertFrom-Json)
+}
+
+function Invoke-WindowsAITuning {
+  param([string]$PeerUrl, [string]$TokenValue, [string]$HostName, [int]$Port, [string]$LocalAddress)
+  Write-Header "AI 智能调参"
+  Write-Subtitle "Windows 端会真实测速并显示 AI 建议；默认不写 Windows TCP 栈。"
+  Write-Host ""
+  Write-Section "AI 调参目标"
+  Write-ModeCard "1" "快速起速" "适合网页、短连接、小文件。" "缩短连接初期提速时间" "Yellow"
+  Write-ModeCard "2" "吞吐优先" "适合下载、备份、大文件。" "优先提高稳定传输速度" "Cyan"
+  Write-ModeCard "3" "重传优先" "适合游戏、语音、远程桌面。" "优先压低重传" "Green"
+  $modeChoice = Read-Host "请选择 AI 调参目标 [1-3]"
+  switch ($modeChoice) {
+    "2" { $objective = "throughput"; $objectiveName = "吞吐优先" }
+    "3" { $objective = "retrans"; $objectiveName = "重传优先" }
+    default { $objective = "startup"; $objectiveName = "快速起速" }
+  }
+
+  Write-Host ""
+  Write-Section "测速"
+  Write-Note "上传" "本机 -> 对端"
+  $upload = Get-IperfMetrics -Result (Run-Iperf -HostName $HostName -Port $Port -LocalAddress $LocalAddress)
+  Write-Note "下载" "对端 -> 本机"
+  $download = Get-IperfMetrics -Result (Run-Iperf -HostName $HostName -Port $Port -LocalAddress $LocalAddress -Reverse)
+  Write-Section "测速摘要"
+  Write-MetricLine "上传速度" (Format-Rate $upload.BitsPerSecond) "Cyan"
+  Write-MetricLine "上传重传" ("{0:N0} 次" -f $upload.Retransmits) $(if ($upload.Retransmits -gt 0) { "Yellow" } else { "Green" })
+  Write-MetricLine "下载速度" (Format-Rate $download.BitsPerSecond) "Cyan"
+  Write-MetricLine "下载重传" ("{0:N0} 次" -f $download.Retransmits) $(if ($download.Retransmits -gt 0) { "Yellow" } else { "Green" })
+
+  Invoke-AgentPost -Url "$PeerUrl/report" -TokenValue $TokenValue -Body ([pscustomobject]@{
+    role = "windows-ai-result"
+    lan_ip = $LocalAddress
+    objective = $objective
+    direction = "both"
+    retransmits = $upload.Retransmits + $download.Retransmits
+    bits_per_second = [Math]::Max($upload.BitsPerSecond, $download.BitsPerSecond)
+    upload_bits_per_second = $upload.BitsPerSecond
+    upload_retransmits = $upload.Retransmits
+    download_bits_per_second = $download.BitsPerSecond
+    download_retransmits = $download.Retransmits
+    time = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  }) | Out-Null
+
+  $model = Select-AIModel
+  $summary = [pscustomobject]@{
+    objective = $objective
+    role = "windows"
+    upload_bits_per_second = $upload.BitsPerSecond
+    upload_retransmits = $upload.Retransmits
+    download_bits_per_second = $download.BitsPerSecond
+    download_retransmits = $download.Retransmits
+    first_second_bits_per_second = $download.FirstSecondBitsPerSecond
+  } | ConvertTo-Json -Compress
+  $prompt = @"
+You are a conservative TCP tuning assistant for a Windows client.
+Return only JSON: {"action":"short Chinese action","risk":"low|medium|high","reason":"short Chinese reason","windows_change":"none|manual-only"}.
+Do not suggest shell commands. Windows client should not auto-write TCP stack.
+Objective: $objectiveName
+Metrics: $summary
+"@
+  $decision = ConvertFrom-AIJson (Invoke-AIChat -Model $model -Prompt $prompt -MaxTokens 256)
+  Write-Host ""
+  Write-Section "AI 建议摘要"
+  Write-MetricLine "模型" $model "Cyan"
+  Write-MetricLine "目标" $objectiveName "Cyan"
+  Write-MetricLine "建议动作" (Repair-DisplayText ([string]$decision.action)) "Yellow"
+  Write-MetricLine "风险" (Repair-DisplayText ([string]$decision.risk)) $(if ($decision.risk -eq "low") { "Green" } else { "Yellow" })
+  Write-MetricLine "修改方式" "Windows 默认不自动写 TCP 栈" "Green"
+  Write-MetricLine "AI 理由" (Repair-DisplayText ([string]$decision.reason)) "Cyan"
 }
 
 function Show-ClientDashboard {
@@ -457,22 +676,24 @@ function Invoke-ClientMenu {
     Write-Section "操作菜单"
     Write-MenuGroup "优化"
     Write-MenuItem "1" "开始优化" "重传 / 吞吐 / 快速起速" "Green"
+    Write-MenuItem "2" "AI 智能调参" "AI 辅助：快速起速 / 吞吐 / 重传" "Cyan"
     Write-Host ""
     Write-MenuGroup "状态"
-    Write-MenuItem "2" "查看本机状态" "系统 / TCP 参数"
-    Write-MenuItem "3" "查看服务端状态" "会话 / 测速服务"
-    Write-MenuItem "4" "查看过程记录" "任务 / 结果"
+    Write-MenuItem "3" "查看本机状态" "系统 / TCP 参数"
+    Write-MenuItem "4" "查看服务端状态" "会话 / 测速服务"
+    Write-MenuItem "5" "查看过程记录" "任务 / 结果"
     Write-Host ""
     Write-MenuGroup "退出"
-    Write-MenuItem "5" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
+    Write-MenuItem "6" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
     Write-MenuItem "0" "退出客户端" "不停止服务端会话" "DarkGray"
     $choice = Read-Host "请选择"
     switch ($choice) {
       "1" { Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress; Read-Host "按回车返回菜单" | Out-Null }
-      "2" { & $PSCommandPath status; Read-Host "按回车返回菜单" | Out-Null }
-      "3" { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回菜单" | Out-Null }
-      "4" { Invoke-AgentGet -Url "$PeerUrl/events" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回菜单" | Out-Null }
-      "5" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
+      "2" { Invoke-WindowsAITuning -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress; Read-Host "按回车返回菜单" | Out-Null }
+      "3" { & $PSCommandPath status; Read-Host "按回车返回菜单" | Out-Null }
+      "4" { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回菜单" | Out-Null }
+      "5" { Invoke-AgentGet -Url "$PeerUrl/events" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回菜单" | Out-Null }
+      "6" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
       "0" { return }
       default { Write-Host "无效选择。" -ForegroundColor Yellow }
     }
@@ -480,13 +701,16 @@ function Invoke-ClientMenu {
 }
 
 if ($Command -eq "status") {
+  $cachedIperf = Get-CachedIperf3
   [pscustomobject]@{
     App = "TCP 双端调优器 Windows 客户端"
     Repo = $RepoUrl
     OS = [System.Environment]::OSVersion.VersionString
     Architecture = $env:PROCESSOR_ARCHITECTURE
     LanIPv4 = Get-LocalLanIPv4
-    HasIperf3 = [bool](Get-Command iperf3 -ErrorAction SilentlyContinue)
+    LanIPv6 = Get-LocalLanIPv6
+    HasIperf3 = [bool]((Get-Command iperf3 -ErrorAction SilentlyContinue) -or $cachedIperf)
+    CachedIperf3 = $cachedIperf
     HasWinget = [bool](Get-Command winget -ErrorAction SilentlyContinue)
     HasChoco = [bool](Get-Command choco -ErrorAction SilentlyContinue)
     HasScoop = [bool](Get-Command scoop -ErrorAction SilentlyContinue)
@@ -499,7 +723,8 @@ if ($Command -eq "join" -or $Command -eq "client") {
   if (-not $Token) { throw "$Command 需要 -Token" }
   Ensure-Command -Name "iperf3"
 
-  $localAddress = Get-LocalLanIPv4
+  $hostName = Get-PeerHost -Url $Peer
+  $localAddress = Get-LocalBindAddress -HostName $hostName
   $report = [pscustomobject]@{
     role = "windows-client"
     os = [System.Environment]::OSVersion.VersionString
@@ -511,7 +736,6 @@ if ($Command -eq "join" -or $Command -eq "client") {
   }
   Invoke-AgentPost -Url "$Peer/report" -TokenValue $Token -Body $report | Out-Null
 
-  $hostName = Get-PeerHost -Url $Peer
   if ($Command -eq "client") {
     Write-Host "已连接到服务端会话。" -ForegroundColor Green
     if ([Environment]::UserInteractive) {
