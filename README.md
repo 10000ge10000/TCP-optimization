@@ -141,20 +141,6 @@ sudo sh tcp-tune.sh stop-agent
 
 本工具只停止自己记录 pid 的临时进程，不会主动杀掉用户已有的长期 iperf3 服务。
 
-## 常见问题
-
-### OpenWrt 需要 Python 吗？
-
-不需要。OpenWrt 客户端可以只依赖 `curl` 和 `iperf3`。
-
-### 为什么服务端需要 Python？
-
-服务端临时 HTTP Agent 使用 Python 标准库实现，所以 Linux/VPS 服务端需要 `python3`。
-
-### AI 调参会不会乱改系统？
-
-不会。AI 只给建议，脚本只执行内置白名单动作，并且写入前会备份。
-
 ## 许可证
 
 MIT
