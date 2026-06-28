@@ -18,6 +18,7 @@ TCP_TUNE_AI_TIMEOUT="${TCP_TUNE_AI_TIMEOUT:-20}"
 TCP_TUNE_AI_MAX_ROUNDS="${TCP_TUNE_AI_MAX_ROUNDS:-5}"
 TCP_TUNE_AI_RETRIES="${TCP_TUNE_AI_RETRIES:-4}"
 TCP_TUNE_AI_CURL_IP_FAMILY="${TCP_TUNE_AI_CURL_IP_FAMILY:--4}"
+TCP_TUNE_AI_MAX_NOTSENT="${TCP_TUNE_AI_MAX_NOTSENT:-1048576}"
 TCP_TUNE_AI_GATEWAY_URL="${TCP_TUNE_AI_GATEWAY_URL:-}"
 TCP_TUNE_AI_GATEWAY_TOKEN="${TCP_TUNE_AI_GATEWAY_TOKEN:-}"
 TCP_TUNE_DEFAULT_AI_GATEWAY_URL="${TCP_TUNE_DEFAULT_AI_GATEWAY_URL:-https://tcp-optimization-ai-gateway.10454728.workers.dev/v1}"
@@ -1069,6 +1070,12 @@ validate_positive_int_range() {
   awk -v value="$value" -v min="$min" -v max="$max" 'BEGIN { exit !(value + 0 >= min + 0 && value + 0 <= max + 0) }'
 }
 
+ai_max_notsent() {
+  value="$TCP_TUNE_AI_MAX_NOTSENT"
+  validate_positive_int_range "$value" 16384 2147483647 || value=1048576
+  echo "$value"
+}
+
 apply_vps_adapt_values() {
   congestion="$1"
   mtu_probing="$2"
@@ -1084,7 +1091,7 @@ apply_vps_adapt_values() {
   validate_bool_number "$slow_start" || die "非法 tcp_slow_start_after_idle：$slow_start"
   validate_positive_int_range "$rmem_max" 1048576 268435456 || die "非法 rmem_max：$rmem_max"
   validate_positive_int_range "$wmem_max" 1048576 268435456 || die "非法 wmem_max：$wmem_max"
-  validate_positive_int_range "$notsent_lowat" 16384 4294967295 || die "非法 tcp_notsent_lowat：$notsent_lowat"
+  validate_positive_int_range "$notsent_lowat" 16384 "$(ai_max_notsent)" || die "非法 tcp_notsent_lowat：$notsent_lowat"
   validate_positive_int_range "$limit_output" 131072 4194304 || die "非法 tcp_limit_output_bytes：$limit_output"
 
   if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -1121,7 +1128,7 @@ apply_openwrt_minimal_values() {
   need_root
   validate_bool_number "$mtu_probing" || die "非法 tcp_mtu_probing：$mtu_probing"
   validate_bool_number "$slow_start" || die "非法 tcp_slow_start_after_idle：$slow_start"
-  validate_positive_int_range "$notsent_lowat" 16384 4294967295 || die "非法 tcp_notsent_lowat：$notsent_lowat"
+  validate_positive_int_range "$notsent_lowat" 16384 "$(ai_max_notsent)" || die "非法 tcp_notsent_lowat：$notsent_lowat"
   validate_positive_int_range "$limit_output" 131072 4194304 || die "非法 tcp_limit_output_bytes：$limit_output"
 
   if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -1158,10 +1165,10 @@ vps_adapt_profile() {
   profile="$1"
   case "$profile" in
     cubic-safe|balanced)
-      apply_vps_adapt_values cubic 1 0 67108864 67108864 4294967295 1048576
+      apply_vps_adapt_values cubic 1 0 67108864 67108864 "$(ai_max_notsent)" 1048576
       ;;
     bbr-fast)
-      apply_vps_adapt_values bbr 1 0 67108864 67108864 4294967295 1048576
+      apply_vps_adapt_values bbr 1 0 67108864 67108864 "$(ai_max_notsent)" 1048576
       ;;
     *)
       die "未知 VPS 适配预设：$profile"
@@ -1309,7 +1316,7 @@ clamp_int() {
   awk -v value="$value" -v min="$min" -v max="$max" 'BEGIN {
     if (value < min) value = min
     if (value > max) value = max
-    printf "%d\n", value
+    printf "%.0f\n", value
   }'
 }
 
@@ -1409,15 +1416,16 @@ ai_curl_client() {
       objective="$2"
       role="$3"
       summary="$(cat)"
+      max_notsent="$(ai_max_notsent)"
       prompt="$(cat <<EOF
 You are a conservative TCP tuning controller. Return only one JSON object. Do not include shell commands.
 Allowed congestion values: cubic,bbr,reno.
-Allowed integer fields: mtu_probing 0/1, slow_start_after_idle 0/1, rmem_max,wmem_max between 1048576 and 268435456, notsent_lowat between 16384 and 4294967295, limit_output_bytes between 131072 and 4194304.
+Allowed integer fields: mtu_probing 0/1, slow_start_after_idle 0/1, rmem_max,wmem_max between 1048576 and 268435456, notsent_lowat between 16384 and $max_notsent, limit_output_bytes between 131072 and 4194304.
 OpenWrt may only use minimal=true plus mtu_probing, slow_start_after_idle, notsent_lowat, limit_output_bytes.
 Objective: $objective
 Role: $role
 Prefer VPS-side adaptation. For high VPS->OpenWrt retransmits with good throughput, prefer cubic-safe. For OpenWrt upload bottlenecks that remain low across tests, do not over-increase buffers.
-Return JSON shape: {"vps":{"congestion":"cubic","mtu_probing":1,"slow_start_after_idle":0,"rmem_max":67108864,"wmem_max":67108864,"notsent_lowat":4294967295,"limit_output_bytes":1048576},"openwrt":{"minimal":true,"mtu_probing":1,"slow_start_after_idle":0,"notsent_lowat":4294967295,"limit_output_bytes":1048576},"reason":"short Chinese reason"}.
+Return JSON shape: {"vps":{"congestion":"cubic","mtu_probing":1,"slow_start_after_idle":0,"rmem_max":67108864,"wmem_max":67108864,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"openwrt":{"minimal":true,"mtu_probing":1,"slow_start_after_idle":0,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"reason":"short Chinese reason"}.
 Summary JSON:
 $summary
 EOF
@@ -1429,13 +1437,14 @@ EOF
     normalize)
       role="$1"
       raw="$(cat)"
+      max_notsent="$(ai_max_notsent)"
       congestion="$(printf '%s' "$raw" | json_string_field congestion cubic)"
       case "$congestion" in cubic|bbr|reno) ;; *) congestion="cubic" ;; esac
       vps_mtu="$(clamp_int "$(printf '%s' "$raw" | json_number_field mtu_probing 1)" 1 0 1)"
       vps_slow="$(clamp_int "$(printf '%s' "$raw" | json_number_field slow_start_after_idle 0)" 0 0 1)"
       vps_rmem="$(clamp_int "$(printf '%s' "$raw" | json_number_field rmem_max 67108864)" 67108864 1048576 268435456)"
       vps_wmem="$(clamp_int "$(printf '%s' "$raw" | json_number_field wmem_max 67108864)" 67108864 1048576 268435456)"
-      vps_notsent="$(clamp_int "$(printf '%s' "$raw" | json_number_field notsent_lowat 4294967295)" 4294967295 16384 4294967295)"
+      vps_notsent="$(clamp_int "$(printf '%s' "$raw" | json_number_field notsent_lowat "$max_notsent")" "$max_notsent" 16384 "$max_notsent")"
       vps_limit="$(clamp_int "$(printf '%s' "$raw" | json_number_field limit_output_bytes 1048576)" 1048576 131072 4194304)"
       reason="$(printf '%s' "$raw" | json_string_field reason 未提供 | tr "'" " " | cut -c 1-160)"
       case "$role" in
@@ -1476,7 +1485,7 @@ ai_require_env() {
 ai_python_client() {
   mode="$1"
   shift || true
-  export NVIDIA_BASE_URL NVIDIA_MODEL TCP_TUNE_AI_TIMEOUT TCP_TUNE_AI_GATEWAY_URL TCP_TUNE_AI_GATEWAY_TOKEN
+  export NVIDIA_BASE_URL NVIDIA_MODEL TCP_TUNE_AI_TIMEOUT TCP_TUNE_AI_GATEWAY_URL TCP_TUNE_AI_GATEWAY_TOKEN TCP_TUNE_AI_MAX_NOTSENT
   if ! have_cmd python3; then
     ai_curl_client "$mode" "$@"
     return "$?"
@@ -1597,13 +1606,15 @@ elif mode == "decide":
     objective = sys.argv[3]
     role = sys.argv[4]
     summary = sys.stdin.read()
+    max_notsent = int(os.environ.get("TCP_TUNE_AI_MAX_NOTSENT", "1048576"))
+    max_notsent = max(16384, min(2147483647, max_notsent))
     system = (
         "You are a conservative TCP tuning controller. "
         "Return only one JSON object. Do not include shell commands. "
         "Allowed congestion values: cubic,bbr,reno. "
         "Allowed integer fields: mtu_probing 0/1, slow_start_after_idle 0/1, "
         "rmem_max,wmem_max between 1048576 and 268435456, "
-        "notsent_lowat between 16384 and 4294967295, "
+        f"notsent_lowat between 16384 and {max_notsent}, "
         "limit_output_bytes between 131072 and 4194304. "
         "OpenWrt may only use minimal=true plus mtu_probing, slow_start_after_idle, notsent_lowat, limit_output_bytes."
     )
@@ -1612,9 +1623,9 @@ elif mode == "decide":
         "Prefer VPS-side adaptation. For high VPS->OpenWrt retransmits with good throughput, prefer cubic-safe. "
         "For OpenWrt upload bottlenecks that remain low across tests, do not over-increase buffers.\n"
         "Return JSON shape: {\"vps\":{\"congestion\":\"cubic\",\"mtu_probing\":1,\"slow_start_after_idle\":0,"
-        "\"rmem_max\":67108864,\"wmem_max\":67108864,\"notsent_lowat\":4294967295,"
+        f"\"rmem_max\":67108864,\"wmem_max\":67108864,\"notsent_lowat\":{max_notsent},"
         "\"limit_output_bytes\":1048576},\"openwrt\":{\"minimal\":true,\"mtu_probing\":1,"
-        "\"slow_start_after_idle\":0,\"notsent_lowat\":4294967295,\"limit_output_bytes\":1048576},"
+        f"\"slow_start_after_idle\":0,\"notsent_lowat\":{max_notsent},\"limit_output_bytes\":1048576},"
         "\"reason\":\"short Chinese reason\"}.\nSummary JSON:\n" + summary
     )
     content = post_chat(model, [{"role": "system", "content": system}, {"role": "user", "content": user}], 512)
@@ -1623,6 +1634,8 @@ elif mode == "normalize":
     role = sys.argv[2]
     raw = sys.stdin.read()
     data = extract_json(raw)
+    max_notsent = int(os.environ.get("TCP_TUNE_AI_MAX_NOTSENT", "1048576"))
+    max_notsent = max(16384, min(2147483647, max_notsent))
     vps = data.get("vps") if isinstance(data.get("vps"), dict) else {}
     op = data.get("openwrt") if isinstance(data.get("openwrt"), dict) else {}
     reason = str(data.get("reason", ""))[:160].replace("'", "")
@@ -1644,12 +1657,12 @@ elif mode == "normalize":
         "vps_slow_start": integer(vps.get("slow_start_after_idle"), 0, 0, 1),
         "vps_rmem_max": integer(vps.get("rmem_max"), 67108864, 1048576, 268435456),
         "vps_wmem_max": integer(vps.get("wmem_max"), 67108864, 1048576, 268435456),
-        "vps_notsent": integer(vps.get("notsent_lowat"), 4294967295, 16384, 4294967295),
+        "vps_notsent": integer(vps.get("notsent_lowat"), max_notsent, 16384, max_notsent),
         "vps_limit": integer(vps.get("limit_output_bytes"), 1048576, 131072, 4194304),
         "op_minimal": 1 if op.get("minimal", True) else 0,
         "op_mtu_probing": integer(op.get("mtu_probing"), 1, 0, 1),
         "op_slow_start": integer(op.get("slow_start_after_idle"), 0, 0, 1),
-        "op_notsent": integer(op.get("notsent_lowat"), 4294967295, 16384, 4294967295),
+        "op_notsent": integer(op.get("notsent_lowat"), max_notsent, 16384, max_notsent),
         "op_limit": integer(op.get("limit_output_bytes"), 1048576, 131072, 4194304),
         "ai_reason": reason,
     }
@@ -3455,7 +3468,7 @@ main() {
         esac
       done
       [ -n "$ipv6_peer" ] || warn "未提供 --ipv6-peer，将仅应用本机最小修正。"
-      apply_openwrt_minimal_values 1 0 4294967295 1048576
+      apply_openwrt_minimal_values 1 0 "$(ai_max_notsent)" 1048576
       ;;
     vps-adapt)
       profile="cubic-safe"
