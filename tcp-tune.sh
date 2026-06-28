@@ -1790,6 +1790,29 @@ print_ai_summary_metrics() {
   ui_row "下载重传" "$(format_count "${dr:-0}") 次"
 }
 
+print_ai_decision_summary() {
+  role="$1"
+  normalized="$2"
+  # normalize 只输出白名单 key='value'，值已做枚举/数值边界校验。
+  eval "$normalized"
+  ui_section "AI 建议摘要"
+  case "$role" in
+    vps)
+      metric_line "调整位置" "VPS 对端" "info"
+      metric_line "拥塞控制" "${vps_congestion:-cubic}" "good"
+      metric_line "发送低水位" "${vps_notsent:-未提供}" "warn"
+      metric_line "输出限制" "${vps_limit:-未提供}" "warn"
+      ;;
+    openwrt)
+      metric_line "调整位置" "本机 OpenWrt（最小修改）" "info"
+      metric_line "发送低水位" "${op_notsent:-未提供}" "warn"
+      metric_line "输出限制" "${op_limit:-未提供}" "warn"
+      metric_line "系统范围" "不改防火墙 / DNS / 代理" "good"
+      ;;
+  esac
+  metric_line "AI 理由" "${ai_reason:-未提供}" "info"
+}
+
 ai_decision_for_summary() {
   summary="$1"
   objective="$2"
@@ -1804,11 +1827,9 @@ EOF
 
 apply_ai_decision() {
   role="$1"
-  decision="$2"
-  normalized="$(printf '%s' "$decision" | ai_python_client normalize "$role")" || die "AI 决策解析失败。"
+  normalized="$2"
   # normalize 只输出白名单 key='value'，值已做枚举/数值边界校验。
   eval "$normalized"
-  ui_note "AI 理由" "${ai_reason:-未提供}"
   case "$role" in
     vps)
       apply_vps_adapt_values "$vps_congestion" "$vps_mtu_probing" "$vps_slow_start" "$vps_rmem_max" "$vps_wmem_max" "$vps_notsent" "$vps_limit"
@@ -1826,7 +1847,7 @@ apply_ai_decision() {
 ai_auto_mode() {
   host=""
   port="$IPERF_PORT"
-  objective="balanced"
+  objective="startup"
   rounds="$TCP_TUNE_AI_MAX_ROUNDS"
   role="auto"
   seconds="12"
@@ -1842,7 +1863,9 @@ ai_auto_mode() {
     esac
   done
   [ -n "$host" ] || die "AI自动优化 需要 --对端"
-  case "$objective" in balanced|throughput|retrans) ;; *) die "--objective 只支持 balanced、throughput、retrans" ;; esac
+  # 兼容旧版本的 balanced；新语义统一为“快速起速”。
+  [ "$objective" = "balanced" ] && objective="startup"
+  case "$objective" in startup|throughput|retrans) ;; *) die "--objective 只支持 startup、throughput、retrans" ;; esac
   validate_positive_int_range "$rounds" 1 "$TCP_TUNE_AI_MAX_ROUNDS" || die "--rounds 必须在 1 和 $TCP_TUNE_AI_MAX_ROUNDS 之间。"
   validate_positive_int_range "$seconds" 5 60 || die "--seconds 必须在 5 和 60 之间。"
 
@@ -1874,10 +1897,11 @@ ai_auto_mode() {
     summary="$(ai_measure_pair "$host" "$port" "$seconds")"
     print_ai_summary_metrics "测速摘要" "$summary"
     decision="$(ai_decision_for_summary "$summary" "$objective" "$role" "$model")" || die "AI 决策请求失败。"
-    ui_note "AI 决策" "$decision"
+    normalized_decision="$(printf '%s' "$decision" | ai_python_client normalize "$role")" || die "AI 决策解析失败。"
+    print_ai_decision_summary "$role" "$normalized_decision"
     previous_summary="$summary"
     previous_backup="$LAST_MANUAL_BACKUP"
-    apply_ai_decision "$role" "$decision"
+    apply_ai_decision "$role" "$normalized_decision"
     current_backup="$LAST_MANUAL_BACKUP"
 
     echo
@@ -1901,7 +1925,7 @@ ai_auto_mode() {
 
 ai_diagnose_mode() {
   summary_file=""
-  objective="balanced"
+  objective="startup"
   role="vps"
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -3171,7 +3195,7 @@ run_client_ai_optimization() {
   ui_subtitle "先真实测速，再让 AI 给出白名单内的参数调整，写入后会自动复测。"
   echo
   ui_section "AI 调参目标"
-  ui_mode_card "1" "均衡优先" "适合多数场景。" "兼顾速度、重传和稳定性"
+  ui_mode_card "1" "快速起速" "适合网页、短连接、小文件。" "缩短连接初期提速时间"
   ui_mode_card "2" "吞吐优先" "适合下载、备份、大文件。" "优先提高稳定传输速度"
   ui_mode_card "3" "重传优先" "适合游戏、语音、远程桌面。" "优先压低重传"
   echo
@@ -3179,7 +3203,7 @@ run_client_ai_optimization() {
   case "$PROMPT_REPLY" in
     2) objective="throughput" ;;
     3) objective="retrans" ;;
-    *) objective="balanced" ;;
+    *) objective="startup" ;;
   esac
 
   echo
@@ -3221,7 +3245,7 @@ client_menu() {
     ui_section "操作菜单"
     ui_menu_group "优化"
     ui_menu_item "1" "开始优化" "确定性调参：重传 / 吞吐 / 快速起速" "$COLOR_GREEN"
-    ui_menu_item "2" "AI 智能调参" "AI 辅助：均衡 / 吞吐 / 重传" "$COLOR_CYAN"
+    ui_menu_item "2" "AI 智能调参" "AI 辅助：快速起速 / 吞吐 / 重传" "$COLOR_CYAN"
     echo
     ui_menu_group "状态"
     ui_menu_item "3" "查看本机状态" "系统 / TCP 参数"
@@ -3376,7 +3400,7 @@ $APP_NAME $APP_VERSION
   sh tcp-tune.sh apply-buffers RMEM_MAX WMEM_MAX
   sh tcp-tune.sh auto --host IP --direction download --objective retrans --target-retr 0 --rtt-ms 100
   sh tcp-tune.sh AI测速
-  sh tcp-tune.sh AI自动优化 --对端 IPV6 --目标 balanced --轮数 5
+  sh tcp-tune.sh AI自动优化 --对端 IPV6 --目标 startup --轮数 5
   sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
   sh tcp-tune.sh local-minimal --ipv6-peer IPV6
   sh tcp-tune.sh vps-adapt --peer-ipv6 IPV6 --profile cubic-safe
