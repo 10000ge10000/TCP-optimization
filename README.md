@@ -129,8 +129,8 @@ sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
 
 AI 不能执行任意命令，只能返回 JSON。脚本会校验字段白名单和数值上下限后再写入。
 
-普通用户默认使用项目提供的 AI 网关，不需要自己配置 NVIDIA Key。
-默认模型为 `minimaxai/minimax-m2.7`，可通过 `NVIDIA_MODEL` 覆盖。
+普通用户默认使用项目提供的 AI 网关，不需要自己配置 API Key。
+默认模型为 `gpt-5.5`，网关由项目方统一转发到 sub2api；可通过 `NVIDIA_MODEL` 覆盖请求模型名。
 
 ## 回滚
 

@@ -31,7 +31,7 @@ https://github.com/10000ge10000/TCP-optimization
 - Shell：Linux/OpenWrt/macOS 主脚本 `tcp-tune.sh`
 - PowerShell：Windows 客户端 `tcp-tune.ps1`
 - Python 标准库：服务端临时 HTTP Agent
-- NVIDIA OpenAI-compatible API：可选 AI 运行时调参建议
+- 项目 AI 网关：默认转发到 sub2api OpenAI-compatible 接口，可选保留 NVIDIA 备用上游
 - iperf3：上传/下载方向测速
 - sysctl：Linux/OpenWrt TCP 参数写入
 - curl/wget：下载脚本和调用 Agent
@@ -46,7 +46,7 @@ https://github.com/10000ge10000/TCP-optimization
 - 客户端模式：探测并上报局域网 IPv4，进入客户端菜单。
 - 智能推荐：按 BDP、RTT、内存和目标生成 TCP 参数。
 - 自动优化：提供重传优先、吞吐优先、快速起速三种目标，按 iperf3 Retr、总吞吐和首秒吞吐迭代调整参数；最后一轮不写入未经复测的参数，指标退化时自动撤销最新调整。
-- AI 自动调参：`ai-auto` 将脱敏测速摘要发送给 NVIDIA API，模型只返回结构化 JSON，脚本按白名单和上下限校验后执行。
+- AI 自动调参：`ai-auto` 将脱敏测速摘要发送给项目 AI 网关，模型只返回结构化 JSON，脚本按白名单和上下限校验后执行。
 - 双端适配：`vps-adapt` 主要调整 VPS 发送侧，`local-minimal` 只对 OpenWrt 写入少量必要 TCP 参数。
 - 客户端展示：隐藏代理公网地址，展示本机 LAN 地址和语义化测速结果；原始 sysctl 参数降级为详细信息。
 - 备份回滚：每次写入前保存 live sysctl 快照。
@@ -110,7 +110,7 @@ AI 自动调参：
 ai-auto
   -> benchmark/select model
   -> iperf3 upload/download baseline
-  -> send redacted summary to NVIDIA /v1/chat/completions
+  -> send redacted summary to AI gateway /v1/chat/completions
   -> parse structured JSON decision
   -> validate whitelist and numeric bounds
   -> apply vps-adapt or local-minimal on current host
@@ -147,10 +147,12 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 | `TCP_TUNE_SESSION_TTL` | `1800` | 会话有效期 |
 | `TCP_TUNE_PUBLIC_URL` | 空 | 手动指定客户端连接 URL |
 | `TCP_TUNE_DRY_RUN` | `0` | 预览模式 |
-| `NVIDIA_API_KEY` | 空 | AI 模式必填，只从环境变量读取 |
-| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | NVIDIA OpenAI-compatible 接口地址 |
-| `NVIDIA_MODEL` | `auto` | 固定模型或自动选择最快可用模型 |
-| `TCP_TUNE_AI_TIMEOUT` | `20` | AI 请求超时秒数 |
+| `TCP_TUNE_AI_GATEWAY_URL` | 项目公共网关 | 普通用户默认无需配置 |
+| `TCP_TUNE_AI_GATEWAY_TOKEN` | 空 | 私有网关鉴权令牌，可选 |
+| `NVIDIA_API_KEY` | 空 | 直接连接 NVIDIA 时使用；只从环境变量读取 |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | 直接连接 NVIDIA 时的 OpenAI-compatible 接口地址 |
+| `NVIDIA_MODEL` | `gpt-5.5` | 固定模型或自动选择最快可用模型 |
+| `TCP_TUNE_AI_TIMEOUT` | `90` | AI 请求超时秒数 |
 | `TCP_TUNE_AI_MAX_ROUNDS` | `5` | AI 自动调参最大轮数 |
 
 运行状态：
@@ -221,7 +223,7 @@ sh tcp-tune.sh --dry-run server --public-url http://1.2.3.4:39188
 - OpenWrt 运行 `client`
 - 验证 `/status`、`/events`、`/test`、`/report`、`/stop`
 - 验证服务端写入端点返回 `403`
-- 验证 `ai-benchmark-models` 在缺少 `NVIDIA_API_KEY` 时明确失败
+- 验证 `ai-benchmark-models` 默认可通过项目 AI 网关运行，私有直连模式缺少 Key 时明确失败
 - 验证 AI 返回非法 JSON、未知字段或越界参数时不会写入
 - 验证 `vps-adapt` 和 `local-minimal` 写入前创建 `/var/lib/tcp-tune/manual-*` 备份
 - 验证 AI 调整后吞吐下降超过 5% 或重传明显升高时自动回滚

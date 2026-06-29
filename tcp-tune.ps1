@@ -19,9 +19,9 @@ $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/10000ge10000/TCP-optimization"
 $ToolRoot = Join-Path $env:LOCALAPPDATA "TCP-optimization"
 $IperfCacheDir = Join-Path $ToolRoot "iperf3"
-$DefaultAiGatewayUrl = "https://tcp-optimization-ai-gateway.10454728.workers.dev/v1"
-$DefaultAiModel = "minimaxai/minimax-m2.7"
-$AiModelCandidates = @("minimaxai/minimax-m2.7", "minimaxai/minimax-m3", "moonshotai/kimi-k2.6", "z-ai/glm-5.1")
+$DefaultAiGatewayUrl = "https://tcp-optimization-ai-gateway.yiwan-share.workers.dev/v1"
+$DefaultAiModel = "gpt-5.5"
+$AiModelCandidates = @("gpt-5.5")
 
 # 显示宽度感知的 padding：中文字符占 2 列，ASCII 占 1 列
 function Format-Pad {

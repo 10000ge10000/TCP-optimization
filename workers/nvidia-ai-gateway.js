@@ -1,5 +1,9 @@
-const UPSTREAM_BASE_URL = "https://integrate.api.nvidia.com/v1";
+const DEFAULT_SUB2API_BASE_URL = "https://api.910501.xyz/v1";
+const DEFAULT_SUB2API_MODEL = "gpt-5.5";
+const DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
 const ALLOWED_MODELS = new Set([
+  "tcp-tune-default",
+  "gpt-5.5",
   "minimaxai/minimax-m3",
   "moonshotai/kimi-k2.6",
   "minimaxai/minimax-m2.7",
@@ -9,7 +13,8 @@ const ALLOWED_MODELS = new Set([
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 const RATE_LIMIT_MAX = 30;
 const MAX_BODY_BYTES = 64 * 1024;
-const MAX_TOKENS_LIMIT = 768;
+const MAX_TOKENS_LIMIT = 4096;
+const UPSTREAM_TIMEOUT_MS = 45 * 1000;
 
 const buckets = new Map();
 
@@ -60,13 +65,45 @@ function sanitizeChatBody(body) {
   };
 }
 
-function upstreamKeys(env) {
-  return [env.NVIDIA_API_KEY, env.NVIDIA_API_KEY_2].filter(Boolean);
+function configuredUpstreams(env) {
+  const upstreams = [];
+  const sub2apiKey = env.SUB2API_API_KEY || env.TCP_TUNE_SUB2API_API_KEY;
+  if (sub2apiKey) {
+    upstreams.push({
+      name: "sub2api",
+      baseUrl: (env.SUB2API_BASE_URL || DEFAULT_SUB2API_BASE_URL).replace(/\/+$/, ""),
+      apiKey: sub2apiKey,
+      model: env.SUB2API_MODEL || DEFAULT_SUB2API_MODEL,
+    });
+  }
+  for (const key of [env.NVIDIA_API_KEY, env.NVIDIA_API_KEY_2].filter(Boolean)) {
+    upstreams.push({
+      name: "nvidia",
+      baseUrl: (env.NVIDIA_BASE_URL || DEFAULT_NVIDIA_BASE_URL).replace(/\/+$/, ""),
+      apiKey: key,
+      model: null,
+    });
+  }
+  return upstreams;
 }
 
-function keyOrder(keys) {
-  if (keys.length <= 1) return keys;
-  return Math.random() < 0.5 ? keys : [keys[1], keys[0]];
+function normalizeForUpstream(body, upstream) {
+  return {
+    ...body,
+    // sub2api owns the real model routing. Public clients can keep using old
+    // model names without learning the private upstream model inventory.
+    model: upstream.model || body.model,
+  };
+}
+
+async function fetchWithTimeout(url, init, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort("upstream timeout"), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export default {
@@ -76,9 +113,11 @@ export default {
     if (request.method === "GET" && url.pathname === "/") {
       return jsonResponse({
         ok: true,
-        service: "TCP-optimization NVIDIA gateway",
+        service: "TCP-optimization AI gateway",
         endpoints: ["/v1/chat/completions"],
         models: Array.from(ALLOWED_MODELS),
+        default_model: DEFAULT_SUB2API_MODEL,
+        upstream: "sub2api",
       });
     }
 
@@ -86,8 +125,8 @@ export default {
       return jsonResponse({ error: "not found" }, 404);
     }
 
-    const keys = upstreamKeys(env);
-    if (keys.length === 0) {
+    const upstreams = configuredUpstreams(env);
+    if (upstreams.length === 0) {
       return jsonResponse({ error: "gateway is not configured" }, 500);
     }
 
@@ -114,19 +153,29 @@ export default {
     }
 
     let upstream;
-    const orderedKeys = keyOrder(keys);
-    for (let i = 0; i < orderedKeys.length; i += 1) {
-      upstream = await fetch(`${UPSTREAM_BASE_URL}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "authorization": `Bearer ${orderedKeys[i]}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(sanitized.body),
-      });
-      if (![429, 500, 502, 503, 504].includes(upstream.status) || i === orderedKeys.length - 1) {
+    let lastError = "";
+    for (let i = 0; i < upstreams.length; i += 1) {
+      const target = upstreams[i];
+      try {
+        upstream = await fetchWithTimeout(`${target.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "authorization": `Bearer ${target.apiKey}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(normalizeForUpstream(sanitized.body, target)),
+        }, Number(env.UPSTREAM_TIMEOUT_MS || UPSTREAM_TIMEOUT_MS));
+      } catch (error) {
+        lastError = `${target.name}: ${error && error.name ? error.name : "fetch failed"}`;
+        continue;
+      }
+      if (![429, 500, 502, 503, 504].includes(upstream.status) || i === upstreams.length - 1) {
         break;
       }
+    }
+
+    if (!upstream) {
+      return jsonResponse({ error: "all upstreams failed", detail: lastError }, 502);
     }
 
     const responseHeaders = new Headers(upstream.headers);

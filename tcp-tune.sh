@@ -14,7 +14,7 @@ SESSION_TTL="${TCP_TUNE_SESSION_TTL:-1800}"
 DRY_RUN="${TCP_TUNE_DRY_RUN:-0}"
 LISTEN_PUBLIC_URL="${TCP_TUNE_PUBLIC_URL:-}"
 NVIDIA_BASE_URL="${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}"
-NVIDIA_MODEL="${NVIDIA_MODEL:-minimaxai/minimax-m2.7}"
+NVIDIA_MODEL="${NVIDIA_MODEL:-gpt-5.5}"
 TCP_TUNE_AI_TIMEOUT="${TCP_TUNE_AI_TIMEOUT:-90}"
 TCP_TUNE_AI_MAX_ROUNDS="${TCP_TUNE_AI_MAX_ROUNDS:-5}"
 TCP_TUNE_AI_RETRIES="${TCP_TUNE_AI_RETRIES:-4}"
@@ -22,11 +22,11 @@ TCP_TUNE_AI_CURL_IP_FAMILY="${TCP_TUNE_AI_CURL_IP_FAMILY:--4}"
 TCP_TUNE_AI_MAX_NOTSENT="${TCP_TUNE_AI_MAX_NOTSENT:-1048576}"
 TCP_TUNE_AI_GATEWAY_URL="${TCP_TUNE_AI_GATEWAY_URL:-}"
 TCP_TUNE_AI_GATEWAY_TOKEN="${TCP_TUNE_AI_GATEWAY_TOKEN:-}"
-TCP_TUNE_DEFAULT_AI_GATEWAY_URL="${TCP_TUNE_DEFAULT_AI_GATEWAY_URL:-https://tcp-optimization-ai-gateway.10454728.workers.dev/v1}"
+TCP_TUNE_DEFAULT_AI_GATEWAY_URL="${TCP_TUNE_DEFAULT_AI_GATEWAY_URL:-https://tcp-optimization-ai-gateway.yiwan-share.workers.dev/v1}"
 if [ -z "${NVIDIA_API_KEY:-}" ] && [ -z "$TCP_TUNE_AI_GATEWAY_URL" ]; then
   TCP_TUNE_AI_GATEWAY_URL="$TCP_TUNE_DEFAULT_AI_GATEWAY_URL"
 fi
-AI_MODEL_CANDIDATES="${TCP_TUNE_AI_MODELS:-minimaxai/minimax-m2.7 minimaxai/minimax-m3 moonshotai/kimi-k2.6 z-ai/glm-5.1}"
+AI_MODEL_CANDIDATES="${TCP_TUNE_AI_MODELS:-gpt-5.5}"
 VPS_ADAPT_FILE="${TCP_TUNE_VPS_ADAPT_FILE:-/etc/sysctl.d/98-tcp-ipv6-openwrt-peer.conf}"
 OPENWRT_MINIMAL_FILE="${TCP_TUNE_OPENWRT_MINIMAL_FILE:-/etc/sysctl.d/zz-tcp-ipv6-local-peer.conf}"
 LAST_MANUAL_BACKUP=""
@@ -1500,7 +1500,6 @@ ai_curl_client() {
         fi
       done
       [ -n "$best_model" ] || return 2
-      printf 'BEST\t%s\n' "$best_model"
       ;;
     select)
       configured="${NVIDIA_MODEL:-auto}"
@@ -1836,7 +1835,11 @@ ai_benchmark_models() {
   print_header "AI 模型测速"
   ui_subtitle "只发送短测试请求，不输出 API Key。"
   # shellcheck disable=SC2086
-  ai_python_client benchmark $AI_MODEL_CANDIDATES
+  rc=0
+  output="$(ai_python_client benchmark $AI_MODEL_CANDIDATES)" || rc="$?"
+  printf '%s\n' "$output"
+  printf 'BEST\t%s\n' "${NVIDIA_MODEL:-gpt-5.5}"
+  return "$rc"
 }
 
 ai_measure_pair() {
@@ -3642,10 +3645,11 @@ $APP_NAME $APP_VERSION
   --dry-run    只展示将执行的动作，不写入系统
 
 AI 环境变量：
-  NVIDIA_API_KEY    必填，只从环境变量读取，不写入仓库或日志
-  NVIDIA_BASE_URL   默认 https://integrate.api.nvidia.com/v1
-  NVIDIA_MODEL      默认 minimaxai/minimax-m2.7；设为 auto 时会在候选模型中选择可用项
-  TCP_TUNE_AI_TIMEOUT 默认 90 秒，适配 m2.7 完整 JSON 决策输出
+  TCP_TUNE_AI_GATEWAY_URL 默认项目公共网关；普通用户无需配置
+  NVIDIA_API_KEY    仅直连 NVIDIA 时需要，只从环境变量读取，不写入仓库或日志
+  NVIDIA_BASE_URL   默认 https://integrate.api.nvidia.com/v1；直接连接 NVIDIA 时使用
+  NVIDIA_MODEL      默认 gpt-5.5；设为 auto 时会在候选模型中选择可用项
+  TCP_TUNE_AI_TIMEOUT 默认 90 秒，适配完整 JSON 决策输出
 EOF
 }
 
