@@ -1523,8 +1523,10 @@ ai_curl_client() {
       summary="$(cat)"
       upload_bps="$(printf '%s' "$summary" | json_number_field upload_bits_per_second 0)"
       upload_retr="$(printf '%s' "$summary" | json_number_field upload_retransmits 0)"
+      upload_first="$(printf '%s' "$summary" | json_number_field upload_first_second_bits_per_second 0)"
       download_bps="$(printf '%s' "$summary" | json_number_field download_bits_per_second 0)"
       download_retr="$(printf '%s' "$summary" | json_number_field download_retransmits 0)"
+      download_first="$(printf '%s' "$summary" | json_number_field download_first_second_bits_per_second 0)"
       max_notsent="$(ai_max_notsent)"
       prompt="$(cat <<EOF
 You are a conservative TCP tuning controller. Return only one JSON object. Do not include shell commands.
@@ -1533,7 +1535,8 @@ Allowed integer fields: mtu_probing 0/1, slow_start_after_idle 0/1, rmem_max,wme
 OpenWrt may only use minimal=true plus mtu_probing, slow_start_after_idle, notsent_lowat, limit_output_bytes.
 Objective: $objective
 Role: $role
-Measurements: upload_bps=$upload_bps, upload_retransmits=$upload_retr, download_bps=$download_bps, download_retransmits=$download_retr.
+Measurements: upload_bps=$upload_bps, upload_retransmits=$upload_retr, upload_first_second_bps=$upload_first, download_bps=$download_bps, download_retransmits=$download_retr, download_first_second_bps=$download_first.
+Objective rules: retrans must reduce retransmits without collapsing throughput; throughput must improve total throughput and tolerate only bounded retransmits; startup must favor first-second speed and short sender queues over peak throughput.
 Prefer VPS-side adaptation. For high VPS->OpenWrt retransmits with good throughput, prefer cubic-safe. For OpenWrt upload bottlenecks that remain low across tests, do not over-increase buffers.
 Your entire response must begin with { and end with }.
 Return only this decision JSON schema: {"vps":{"congestion":"cubic","mtu_probing":1,"slow_start_after_idle":0,"rmem_max":67108864,"wmem_max":67108864,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"openwrt":{"minimal":true,"mtu_probing":1,"slow_start_after_idle":0,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"reason":"short Chinese reason"}.
@@ -1857,9 +1860,11 @@ ai_measure_pair() {
   fi
   upload_bps="$(printf '%s\n' "$upload_json" | extract_bps)"
   upload_retr="$(printf '%s\n' "$upload_json" | extract_retransmits)"
+  upload_first="$(printf '%s\n' "$upload_json" | extract_first_interval_bps)"
   [ -n "$upload_bps" ] || die "上传测速失败：iperf3 未返回 bits_per_second。"
   upload_bps="${upload_bps:-0}"
   upload_retr="${upload_retr:-0}"
+  upload_first="${upload_first:-0}"
 
   ui_note "测速" "下载：对端 → 本机" >&2
   download_json="$(run_iperf_client "$host" "$port" 1 "$seconds" "$bind_ip" || true)"
@@ -1869,12 +1874,14 @@ ai_measure_pair() {
   fi
   download_bps="$(printf '%s\n' "$download_json" | extract_bps)"
   download_retr="$(printf '%s\n' "$download_json" | extract_retransmits)"
+  download_first="$(printf '%s\n' "$download_json" | extract_first_interval_bps)"
   [ -n "$download_bps" ] || die "下载测速失败：iperf3 未返回 bits_per_second。"
   download_bps="${download_bps:-0}"
   download_retr="${download_retr:-0}"
+  download_first="${download_first:-0}"
 
   cat <<EOF
-{"upload_bits_per_second":$upload_bps,"upload_retransmits":$upload_retr,"download_bits_per_second":$download_bps,"download_retransmits":$download_retr}
+{"upload_bits_per_second":$upload_bps,"upload_retransmits":$upload_retr,"upload_first_second_bits_per_second":$upload_first,"download_bits_per_second":$download_bps,"download_retransmits":$download_retr,"download_first_second_bits_per_second":$download_first}
 EOF
 }
 
@@ -1899,8 +1906,9 @@ metric_from_summary() {
 }
 
 summary_regressed() {
-  before="$1"
-  after="$2"
+  objective="$1"
+  before="$2"
+  after="$3"
   before_up="$(printf '%s\n' "$before" | metric_from_summary upload_bits_per_second)"
   after_up="$(printf '%s\n' "$after" | metric_from_summary upload_bits_per_second)"
   before_down="$(printf '%s\n' "$before" | metric_from_summary download_bits_per_second)"
@@ -1909,15 +1917,81 @@ summary_regressed() {
   after_ur="$(printf '%s\n' "$after" | metric_from_summary upload_retransmits)"
   before_dr="$(printf '%s\n' "$before" | metric_from_summary download_retransmits)"
   after_dr="$(printf '%s\n' "$after" | metric_from_summary download_retransmits)"
+  before_uf="$(printf '%s\n' "$before" | metric_from_summary upload_first_second_bits_per_second)"
+  after_uf="$(printf '%s\n' "$after" | metric_from_summary upload_first_second_bits_per_second)"
+  before_df="$(printf '%s\n' "$before" | metric_from_summary download_first_second_bits_per_second)"
+  after_df="$(printf '%s\n' "$after" | metric_from_summary download_first_second_bits_per_second)"
   awk -v bu="${before_up:-0}" -v au="${after_up:-0}" -v bd="${before_down:-0}" -v ad="${after_down:-0}" \
-      -v bur="${before_ur:-0}" -v aur="${after_ur:-0}" -v bdr="${before_dr:-0}" -v adr="${after_dr:-0}" '
+      -v bur="${before_ur:-0}" -v aur="${after_ur:-0}" -v bdr="${before_dr:-0}" -v adr="${after_dr:-0}" \
+      -v buf="${before_uf:-0}" -v auf="${after_uf:-0}" -v bdf="${before_df:-0}" -v adf="${after_df:-0}" \
+      -v objective="$objective" '
     BEGIN {
       bad = 0
-      if (bu > 0 && au < bu * 0.95) bad = 1
-      if (bd > 0 && ad < bd * 0.95) bad = 1
-      if (bur > 100 && aur > bur * 1.5) bad = 1
-      if (bdr > 100 && adr > bdr * 1.5) bad = 1
+      before_speed = bu + bd
+      after_speed = au + ad
+      before_retr = bur + bdr
+      after_retr = aur + adr
+      before_first = buf + bdf
+      after_first = auf + adf
+      if (objective == "retrans") {
+        if (before_retr > 100 && after_retr > before_retr * 1.20) bad = 1
+        if (before_retr <= 100 && after_retr > before_retr + 200) bad = 1
+        if (before_speed > 0 && after_speed < before_speed * 0.85) bad = 1
+      } else if (objective == "throughput") {
+        if (before_speed > 0 && after_speed < before_speed * 0.95) bad = 1
+        if (before_speed > 0 && after_speed < before_speed * 1.03 && before_retr > 100 && after_retr > before_retr * 1.35) bad = 1
+        if (before_retr <= 100 && after_retr > 1000 && before_speed > 0 && after_speed < before_speed * 1.05) bad = 1
+      } else {
+        if (buf > 0 && auf < buf * 0.90) bad = 1
+        if (bdf > 0 && adf < bdf * 0.90) bad = 1
+        if (before_first > 0 && after_first < before_first * 0.95) bad = 1
+        if (before_speed > 0 && after_speed < before_speed * 0.80) bad = 1
+        if (before_retr > 100 && after_retr > before_retr * 2.0 && after_retr > 500) bad = 1
+      }
       exit !bad
+    }
+  '
+}
+
+summary_objective_note() {
+  objective="$1"
+  before="$2"
+  after="$3"
+  before_up="$(printf '%s\n' "$before" | metric_from_summary upload_bits_per_second)"
+  after_up="$(printf '%s\n' "$after" | metric_from_summary upload_bits_per_second)"
+  before_down="$(printf '%s\n' "$before" | metric_from_summary download_bits_per_second)"
+  after_down="$(printf '%s\n' "$after" | metric_from_summary download_bits_per_second)"
+  before_ur="$(printf '%s\n' "$before" | metric_from_summary upload_retransmits)"
+  after_ur="$(printf '%s\n' "$after" | metric_from_summary upload_retransmits)"
+  before_dr="$(printf '%s\n' "$before" | metric_from_summary download_retransmits)"
+  after_dr="$(printf '%s\n' "$after" | metric_from_summary download_retransmits)"
+  before_uf="$(printf '%s\n' "$before" | metric_from_summary upload_first_second_bits_per_second)"
+  after_uf="$(printf '%s\n' "$after" | metric_from_summary upload_first_second_bits_per_second)"
+  before_df="$(printf '%s\n' "$before" | metric_from_summary download_first_second_bits_per_second)"
+  after_df="$(printf '%s\n' "$after" | metric_from_summary download_first_second_bits_per_second)"
+  awk -v bu="${before_up:-0}" -v au="${after_up:-0}" -v bd="${before_down:-0}" -v ad="${after_down:-0}" \
+      -v bur="${before_ur:-0}" -v aur="${after_ur:-0}" -v bdr="${before_dr:-0}" -v adr="${after_dr:-0}" \
+      -v buf="${before_uf:-0}" -v auf="${after_uf:-0}" -v bdf="${before_df:-0}" -v adf="${after_df:-0}" \
+      -v objective="$objective" '
+    BEGIN {
+      before_speed = bu + bd
+      after_speed = au + ad
+      before_retr = bur + bdr
+      after_retr = aur + adr
+      before_first = buf + bdf
+      after_first = auf + adf
+      speed_delta = before_speed > 0 ? (after_speed - before_speed) * 100 / before_speed : 0
+      first_delta = before_first > 0 ? (after_first - before_first) * 100 / before_first : 0
+      if (objective == "retrans") {
+        if (after_retr <= before_retr || after_retr <= 100) print "重传未恶化或已压低，保留本轮参数。"
+        else print "重传仍偏高，下一轮继续收缩排队。"
+      } else if (objective == "throughput") {
+        if (speed_delta >= 3) print "吞吐提升 " sprintf("%.0f%%", speed_delta) "，重传在可控范围内。"
+        else print "吞吐未明显提升，下一轮会更保守。"
+      } else {
+        if (before_first > 0 && first_delta >= 0) print "首秒速度未下降，保留低排队参数。"
+        else print "起速未显著改善，下一轮继续压低排队。"
+      }
     }
   '
 }
@@ -1927,13 +2001,17 @@ print_ai_summary_metrics() {
   summary="$2"
   up="$(printf '%s\n' "$summary" | metric_from_summary upload_bits_per_second)"
   ur="$(printf '%s\n' "$summary" | metric_from_summary upload_retransmits)"
+  uf="$(printf '%s\n' "$summary" | metric_from_summary upload_first_second_bits_per_second)"
   down="$(printf '%s\n' "$summary" | metric_from_summary download_bits_per_second)"
   dr="$(printf '%s\n' "$summary" | metric_from_summary download_retransmits)"
+  df="$(printf '%s\n' "$summary" | metric_from_summary download_first_second_bits_per_second)"
   ui_section "$title"
   ui_row "上传速度" "$(format_rate "${up:-0}")"
   ui_row "上传重传" "$(format_count "${ur:-0}") 次"
+  [ "${uf:-0}" = "0" ] || ui_row "上传首秒" "$(format_rate "$uf")"
   ui_row "下载速度" "$(format_rate "${down:-0}")"
   ui_row "下载重传" "$(format_count "${dr:-0}") 次"
+  [ "${df:-0}" = "0" ] || ui_row "下载首秒" "$(format_rate "$df")"
 }
 
 print_ai_comparison_table() {
@@ -1943,18 +2021,28 @@ print_ai_comparison_table() {
   after_up="$(printf '%s\n' "$after" | metric_from_summary upload_bits_per_second)"
   before_ur="$(printf '%s\n' "$before" | metric_from_summary upload_retransmits)"
   after_ur="$(printf '%s\n' "$after" | metric_from_summary upload_retransmits)"
+  before_uf="$(printf '%s\n' "$before" | metric_from_summary upload_first_second_bits_per_second)"
+  after_uf="$(printf '%s\n' "$after" | metric_from_summary upload_first_second_bits_per_second)"
   before_down="$(printf '%s\n' "$before" | metric_from_summary download_bits_per_second)"
   after_down="$(printf '%s\n' "$after" | metric_from_summary download_bits_per_second)"
   before_dr="$(printf '%s\n' "$before" | metric_from_summary download_retransmits)"
   after_dr="$(printf '%s\n' "$after" | metric_from_summary download_retransmits)"
+  before_df="$(printf '%s\n' "$before" | metric_from_summary download_first_second_bits_per_second)"
+  after_df="$(printf '%s\n' "$after" | metric_from_summary download_first_second_bits_per_second)"
 
   ui_section "优化前后对比"
   printf "  %s%s │ %-14s │ %-14s │ %-10s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$(ui_pad "指标" 12)" "优化前" "优化后" "变化" "$COLOR_RESET"
   printf "  %s\n" "---------------------------------------------------------------"
   printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "上传速度" 12)" "$(format_rate "${before_up:-0}")" "$(format_rate "${after_up:-0}")" "$(percent_delta "${before_up:-0}" "${after_up:-0}")"
   printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "上传重传" 12)" "$(format_count "${before_ur:-0}") 次" "$(format_count "${after_ur:-0}") 次" "$(percent_delta "${before_ur:-0}" "${after_ur:-0}")"
+  if [ "${before_uf:-0}" != "0" ] || [ "${after_uf:-0}" != "0" ]; then
+    printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "上传首秒" 12)" "$(format_rate "${before_uf:-0}")" "$(format_rate "${after_uf:-0}")" "$(percent_delta "${before_uf:-0}" "${after_uf:-0}")"
+  fi
   printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "下载速度" 12)" "$(format_rate "${before_down:-0}")" "$(format_rate "${after_down:-0}")" "$(percent_delta "${before_down:-0}" "${after_down:-0}")"
   printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "下载重传" 12)" "$(format_count "${before_dr:-0}") 次" "$(format_count "${after_dr:-0}") 次" "$(percent_delta "${before_dr:-0}" "${after_dr:-0}")"
+  if [ "${before_df:-0}" != "0" ] || [ "${after_df:-0}" != "0" ]; then
+    printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "下载首秒" 12)" "$(format_rate "${before_df:-0}")" "$(format_rate "${after_df:-0}")" "$(percent_delta "${before_df:-0}" "${after_df:-0}")"
+  fi
 }
 
 print_ai_decision_summary() {
@@ -1978,6 +2066,57 @@ print_ai_decision_summary() {
       ;;
   esac
   metric_line "AI 理由" "${ai_reason:-未提供}" "info"
+}
+
+objective_clamp_ai_decision() {
+  role="$1"
+  objective="$2"
+  normalized="$3"
+  # 先信任 normalize 的白名单和硬上限，再按目标模式收紧可排队数据量。
+  eval "$normalized"
+  case "$role:$objective" in
+    openwrt:startup)
+      [ "${op_notsent:-0}" -gt 65536 ] && op_notsent=65536
+      [ "${op_limit:-0}" -gt 262144 ] && op_limit=262144
+      ai_reason="${ai_reason:-未提供}；已按快速起速目标收紧本机发送队列。"
+      ;;
+    openwrt:retrans)
+      [ "${op_notsent:-0}" -gt 262144 ] && op_notsent=262144
+      [ "${op_limit:-0}" -gt 524288 ] && op_limit=524288
+      ai_reason="${ai_reason:-未提供}；已按重传优先目标收紧本机发送队列。"
+      ;;
+    vps:startup)
+      [ "${vps_notsent:-0}" -gt 131072 ] && vps_notsent=131072
+      [ "${vps_limit:-0}" -gt 262144 ] && vps_limit=262144
+      ai_reason="${ai_reason:-未提供}；已按快速起速目标收紧 VPS 发送队列。"
+      ;;
+    vps:retrans)
+      [ "${vps_notsent:-0}" -gt 262144 ] && vps_notsent=262144
+      [ "${vps_limit:-0}" -gt 524288 ] && vps_limit=524288
+      ai_reason="${ai_reason:-未提供}；已按重传优先目标收紧 VPS 发送队列。"
+      ;;
+  esac
+
+  case "$role" in
+    vps)
+      printf "vps_congestion='%s'\n" "${vps_congestion:-cubic}"
+      printf "vps_mtu_probing='%s'\n" "${vps_mtu_probing:-1}"
+      printf "vps_slow_start='%s'\n" "${vps_slow_start:-0}"
+      printf "vps_rmem_max='%s'\n" "${vps_rmem_max:-67108864}"
+      printf "vps_wmem_max='%s'\n" "${vps_wmem_max:-67108864}"
+      printf "vps_notsent='%s'\n" "${vps_notsent:-1048576}"
+      printf "vps_limit='%s'\n" "${vps_limit:-1048576}"
+      printf "ai_reason='%s'\n" "$(printf '%s' "${ai_reason:-未提供}" | tr "'" " " | cut -c 1-220)"
+      ;;
+    openwrt)
+      printf "op_minimal='%s'\n" "${op_minimal:-1}"
+      printf "op_mtu_probing='%s'\n" "${op_mtu_probing:-1}"
+      printf "op_slow_start='%s'\n" "${op_slow_start:-0}"
+      printf "op_notsent='%s'\n" "${op_notsent:-1048576}"
+      printf "op_limit='%s'\n" "${op_limit:-1048576}"
+      printf "ai_reason='%s'\n" "$(printf '%s' "${ai_reason:-未提供}" | tr "'" " " | cut -c 1-220)"
+      ;;
+  esac
 }
 
 ai_decision_for_summary() {
@@ -2114,6 +2253,7 @@ ai_auto_mode() {
       decision="$(ai_fallback_decision_json "$objective" "$role")"
       normalized_decision="$(printf '%s' "$decision" | ai_python_client normalize "$role")" || die "内置策略解析失败。"
     }
+    normalized_decision="$(objective_clamp_ai_decision "$role" "$objective" "$normalized_decision")"
     print_ai_decision_summary "$role" "$normalized_decision"
     previous_summary="$summary"
     previous_backup="$LAST_MANUAL_BACKUP"
@@ -2125,11 +2265,12 @@ ai_auto_mode() {
     after_summary="$(ai_measure_pair "$host" "$port" "$seconds")"
     print_ai_summary_metrics "复测摘要" "$after_summary"
     print_ai_comparison_table "$previous_summary" "$after_summary"
-    if summary_regressed "$previous_summary" "$after_summary"; then
+    if summary_regressed "$objective" "$previous_summary" "$after_summary"; then
       warn "复测指标退化超过阈值，正在回滚本轮 AI 调整。"
       restore_manual_backup "$current_backup"
       break
     fi
+    ui_note "目标判定" "$(summary_objective_note "$objective" "$previous_summary" "$after_summary")"
     ui_note "结果" "本轮调整通过复测，继续下一轮或结束。"
     round=$((round + 1))
   done
@@ -2303,6 +2444,36 @@ percent_delta() {
     if (delta > 0) printf "+%.0f%%\n", delta
     else printf "%.0f%%\n", delta
   }'
+}
+
+objective_numbers_regressed() {
+  objective="$1"
+  first_bps="${2:-0}"
+  final_bps="${3:-0}"
+  first_retr="${4:-0}"
+  final_retr="${5:-0}"
+  first_startup_bps="${6:-0}"
+  final_startup_bps="${7:-0}"
+  target_retr="${8:-0}"
+  awk -v objective="$objective" -v fb="$first_bps" -v lb="$final_bps" \
+      -v fr="$first_retr" -v lr="$final_retr" -v fs="$first_startup_bps" \
+      -v ls="$final_startup_bps" -v target="$target_retr" '
+    BEGIN {
+      bad = 0
+      if (objective == "retrans") {
+        if (lr > target && fr > 0 && lr > fr * 1.10) bad = 1
+        if (fb > 0 && lb < fb * 0.85) bad = 1
+      } else if (objective == "throughput") {
+        if (fb > 0 && lb < fb * 0.97) bad = 1
+        if (fb > 0 && lb < fb * 1.05 && fr > 100 && lr > fr * 2.0) bad = 1
+      } else {
+        if (fs > 0 && ls < fs * 0.95) bad = 1
+        if (fb > 0 && lb < fb * 0.80) bad = 1
+        if (fr > 100 && lr > fr * 2.0 && lr > 500) bad = 1
+      }
+      exit !bad
+    }
+  '
 }
 
 progress_steps() {
@@ -2505,17 +2676,22 @@ tune_step() {
       if [ "$bps" != "0" ]; then
         rmem="$(awk -v r="$rmem" -v b="$bdp_bytes" 'BEGIN {v=int(r*1.35); if(v<b*4) v=int(b*4); printf "%d", v}')"
         wmem="$(awk -v w="$wmem" -v b="$bdp_bytes" 'BEGIN {v=int(w*1.35); if(v<b*4) v=int(b*4); printf "%d", v}')"
-        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.25); if(v>262144) v=262144; printf "%d", v}')"
+        notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.25); if(v>524288) v=524288; printf "%d", v}')"
         if [ "$adv" -gt 1 ]; then
           adv="$(awk -v a="$adv" 'BEGIN {v=a-1; if(v<1) v=1; printf "%d", v}')"
         fi
       fi
       ;;
     startup)
-      notsent="$(awk -v n="$notsent" 'BEGIN {v=int(n*1.15); if(v>131072) v=131072; printf "%d", v}')"
-      wmem="$(awk -v w="$wmem" 'BEGIN {v=int(w*1.15); if(v<65536) v=65536; printf "%d", v}')"
-      rmem="$(awk -v r="$rmem" 'BEGIN {v=int(r*1.1); if(v<65536) v=65536; printf "%d", v}')"
-      adv="$(awk -v a="$adv" 'BEGIN {v=a+1; if(v>5) v=5; printf "%d", v}')"
+      notsent="$(awk -v n="$notsent" 'BEGIN {
+        if (n > 65536) v=int(n*0.75); else v=int(n*0.90)
+        if (v < 16384) v=16384
+        if (v > 65536) v=65536
+        printf "%d", v
+      }')"
+      wmem="$(awk -v w="$wmem" -v min="$min_wmem" 'BEGIN {v=w; if(v<min) v=min; printf "%d", v}')"
+      rmem="$(awk -v r="$rmem" -v min="$min_rmem" 'BEGIN {v=r; if(v<min) v=min; printf "%d", v}')"
+      adv="$(awk -v a="$adv" 'BEGIN {v=a; if(v<2) v=2; if(v>3) v=3; printf "%d", v}')"
       ;;
   esac
 
@@ -2550,6 +2726,7 @@ auto_tune() {
   need_root
   install_runtime_deps
   ensure_tcp_baseline
+  auto_initial_backup="$(manual_backup_begin "auto-$objective" 2>/dev/null || true)"
   [ -n "$memory_mb_value" ] || memory_mb_value="$(memory_mb)"
   local_public_ip="$(public_ip || true)"
   if [ "$allow_same_public" != "1" ] && [ -n "$local_public_ip" ] && [ "$host" = "$local_public_ip" ]; then
@@ -2752,6 +2929,16 @@ auto_tune() {
     i=$((i + 1))
   done
   [ "$completed_rounds" = "0" ] && completed_rounds="$rounds"
+  if [ "$applied_change_count" -gt 0 ] && [ -n "${auto_initial_backup:-}" ]; then
+    if objective_numbers_regressed "$objective" "${first_bps:-0}" "$final_bps" "${first_retr:-0}" "$final_retr" "${first_startup_bps:-0}" "$final_startup_bps" "$target_retr"; then
+      restore_manual_backup "$auto_initial_backup" >/dev/null 2>&1 || true
+      rolled_back_regression="1"
+      applied_change_count="0"
+      final_retr="${first_retr:-0}"
+      final_bps="${first_bps:-0}"
+      final_startup_bps="${first_startup_bps:-0}"
+    fi
+  fi
   clear_screen
   print_header "优化完成"
   ui_subtitle "$mode_name · $transfer_name · 共测试 $completed_rounds 轮"
