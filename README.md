@@ -26,6 +26,7 @@ TCP-optimization 是一个双端 TCP 调优脚本，用来在 VPS 和客户端�
 
 - 双端通讯：服务端启动后给出客户端连接命令。
 - 自动依赖：自动检测并安装 iperf3、curl、python3 等必要依赖。
+- 基础加速：客户端/调参路径默认启用 BBR 与 FQ/fq_codel。
 - 三种确定性优化：重传优先、吞吐优先、快速起速。
 - AI 智能调参：AI 只返回结构化建议，脚本按白名单和数值边界执行。
 - OpenWrt 轻量支持：OpenWrt 端不要求 python3。
@@ -91,6 +92,7 @@ OpenWrt 端只会做 TCP 相关的最小修改，常见写入位置：
 
 ```text
 /etc/sysctl.d/99-tcp-tune.conf
+/etc/sysctl.d/97-tcp-tune-baseline.conf
 /etc/sysctl.d/zz-tcp-ipv6-local-peer.conf
 ```
 
@@ -98,9 +100,11 @@ OpenWrt 端只会做 TCP 相关的最小修改，常见写入位置：
 
 ```text
 net.ipv4.tcp_mtu_probing
+net.ipv4.tcp_congestion_control
 net.ipv4.tcp_slow_start_after_idle
 net.ipv4.tcp_notsent_lowat
 net.ipv4.tcp_limit_output_bytes
+net.core.default_qdisc
 net.core.rmem_max
 net.core.wmem_max
 net.ipv4.tcp_rmem
