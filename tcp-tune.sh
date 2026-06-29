@@ -1936,6 +1936,27 @@ print_ai_summary_metrics() {
   ui_row "下载重传" "$(format_count "${dr:-0}") 次"
 }
 
+print_ai_comparison_table() {
+  before="$1"
+  after="$2"
+  before_up="$(printf '%s\n' "$before" | metric_from_summary upload_bits_per_second)"
+  after_up="$(printf '%s\n' "$after" | metric_from_summary upload_bits_per_second)"
+  before_ur="$(printf '%s\n' "$before" | metric_from_summary upload_retransmits)"
+  after_ur="$(printf '%s\n' "$after" | metric_from_summary upload_retransmits)"
+  before_down="$(printf '%s\n' "$before" | metric_from_summary download_bits_per_second)"
+  after_down="$(printf '%s\n' "$after" | metric_from_summary download_bits_per_second)"
+  before_dr="$(printf '%s\n' "$before" | metric_from_summary download_retransmits)"
+  after_dr="$(printf '%s\n' "$after" | metric_from_summary download_retransmits)"
+
+  ui_section "优化前后对比"
+  printf "  %s%s │ %-14s │ %-14s │ %-10s%s\n" "$COLOR_BOLD$COLOR_CYAN" "$(ui_pad "指标" 12)" "优化前" "优化后" "变化" "$COLOR_RESET"
+  printf "  %s\n" "---------------------------------------------------------------"
+  printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "上传速度" 12)" "$(format_rate "${before_up:-0}")" "$(format_rate "${after_up:-0}")" "$(percent_delta "${before_up:-0}" "${after_up:-0}")"
+  printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "上传重传" 12)" "$(format_count "${before_ur:-0}") 次" "$(format_count "${after_ur:-0}") 次" "$(percent_delta "${before_ur:-0}" "${after_ur:-0}")"
+  printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "下载速度" 12)" "$(format_rate "${before_down:-0}")" "$(format_rate "${after_down:-0}")" "$(percent_delta "${before_down:-0}" "${after_down:-0}")"
+  printf "  %s │ %-14s │ %-14s │ %-10s\n" "$(ui_pad "下载重传" 12)" "$(format_count "${before_dr:-0}") 次" "$(format_count "${after_dr:-0}") 次" "$(percent_delta "${before_dr:-0}" "${after_dr:-0}")"
+}
+
 print_ai_decision_summary() {
   role="$1"
   normalized="$2"
@@ -2103,6 +2124,7 @@ ai_auto_mode() {
     ui_section "复测"
     after_summary="$(ai_measure_pair "$host" "$port" "$seconds")"
     print_ai_summary_metrics "复测摘要" "$after_summary"
+    print_ai_comparison_table "$previous_summary" "$after_summary"
     if summary_regressed "$previous_summary" "$after_summary"; then
       warn "复测指标退化超过阈值，正在回滚本轮 AI 调整。"
       restore_manual_backup "$current_backup"
