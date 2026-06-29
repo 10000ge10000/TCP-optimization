@@ -114,6 +114,15 @@ function Write-MenuItem {
   Write-Host "  $Description" -ForegroundColor DarkGray
 }
 
+function Test-BackChoice {
+  param([string]$Value)
+  return $Value -in @("0", "q", "Q", "b", "B")
+}
+
+function Write-BackMenuItem {
+  Write-MenuItem "0" "返回主菜单" "不执行本页操作" "DarkGray"
+}
+
 function Repair-DisplayText {
   param([string]$Text)
   if (-not $Text) { return "" }
@@ -438,7 +447,9 @@ function Invoke-WindowsAITuning {
   Write-ModeCard "1" "快速起速" "适合网页、短连接、小文件。" "缩短连接初期提速时间" "Yellow"
   Write-ModeCard "2" "吞吐优先" "适合下载、备份、大文件。" "优先提高稳定传输速度" "Cyan"
   Write-ModeCard "3" "重传优先" "适合游戏、语音、远程桌面。" "优先压低重传" "Green"
-  $modeChoice = Read-Host "请选择 AI 调参目标 [1-3]"
+  Write-BackMenuItem
+  $modeChoice = Read-Host "请选择 AI 调参目标 [1-3/0]"
+  if (Test-BackChoice $modeChoice) { return $false }
   switch ($modeChoice) {
     "2" { $objective = "throughput"; $objectiveName = "吞吐优先" }
     "3" { $objective = "retrans"; $objectiveName = "重传优先" }
@@ -497,6 +508,7 @@ Metrics: $summary
   Write-MetricLine "风险" (Repair-DisplayText ([string]$decision.risk)) $(if ($decision.risk -eq "low") { "Green" } else { "Yellow" })
   Write-MetricLine "修改方式" "Windows 默认不自动写 TCP 栈" "Green"
   Write-MetricLine "AI 理由" (Repair-DisplayText ([string]$decision.reason)) "Cyan"
+  return $true
 }
 
 function Show-ClientDashboard {
@@ -650,7 +662,9 @@ function Select-WindowsOptimization {
   Write-ModeCard "1" "重传优先" "适合游戏、语音、远程桌面。" "尽量把重传降到 0" "Green"
   Write-ModeCard "2" "吞吐优先" "适合下载、备份、大文件。" "优先提升稳定传输速率" "Cyan"
   Write-ModeCard "3" "快速起速" "适合网页、短连接、小文件。" "缩短连接初期的提速时间" "Yellow"
-  $modeChoice = Read-Host "请选择优化目标 [1-3]"
+  Write-BackMenuItem
+  $modeChoice = Read-Host "请选择优化目标 [1-3/0]"
+  if (Test-BackChoice $modeChoice) { return $false }
   switch ($modeChoice) {
     "2" { $selectedObjective = "throughput"; $selectedRounds = 3; $selectedTarget = 10 }
     "3" { $selectedObjective = "startup"; $selectedRounds = 3; $selectedTarget = 5 }
@@ -661,11 +675,14 @@ function Select-WindowsOptimization {
   Write-Section "测试方向"
   Write-Host "  [1] 下载  服务端 -> 本机"
   Write-Host "  [2] 上传  本机 -> 服务端"
+  Write-BackMenuItem
   Write-Host "当前选择：" -NoNewline -ForegroundColor Green
   Write-Host ("{0} · 默认下载方向" -f (Get-ObjectiveLabel -Value $selectedObjective))
-  $directionChoice = Read-Host "请选择测试方向 [1-2]"
+  $directionChoice = Read-Host "请选择测试方向 [1-2/0]"
+  if (Test-BackChoice $directionChoice) { return $false }
   $selectedDirection = if ($directionChoice -eq "2") { "upload" } else { "download" }
   Invoke-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress -SelectedObjective $selectedObjective -SelectedDirection $selectedDirection -SelectedRounds $selectedRounds -SelectedTargetRetr $selectedTarget
+  return $true
 }
 
 function Invoke-ClientMenu {
@@ -688,11 +705,11 @@ function Invoke-ClientMenu {
     Write-MenuItem "0" "退出客户端" "不停止服务端会话" "DarkGray"
     $choice = Read-Host "请选择"
     switch ($choice) {
-      "1" { Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress; Read-Host "按回车返回菜单" | Out-Null }
-      "2" { Invoke-WindowsAITuning -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress; Read-Host "按回车返回菜单" | Out-Null }
-      "3" { & $PSCommandPath status; Read-Host "按回车返回菜单" | Out-Null }
-      "4" { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回菜单" | Out-Null }
-      "5" { Invoke-AgentGet -Url "$PeerUrl/events" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回菜单" | Out-Null }
+      "1" { if (Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
+      "2" { if (Invoke-WindowsAITuning -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
+      "3" { & $PSCommandPath status; Read-Host "按回车返回主菜单" | Out-Null }
+      "4" { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回主菜单" | Out-Null }
+      "5" { Invoke-AgentGet -Url "$PeerUrl/events" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回主菜单" | Out-Null }
       "6" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
       "0" { return }
       default { Write-Host "无效选择。" -ForegroundColor Yellow }

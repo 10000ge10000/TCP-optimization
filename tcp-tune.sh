@@ -40,6 +40,7 @@ COLOR_YELLOW=""
 COLOR_BLUE=""
 COLOR_CYAN=""
 PROMPT_REPLY=""
+MENU_RETURNED="0"
 
 setup_colors() {
   if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
@@ -77,9 +78,25 @@ prompt_read() {
   return 0
 }
 
+is_back_choice() {
+  case "$1" in
+    0|q|Q|b|B) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+return_to_menu() {
+  MENU_RETURNED="1"
+  return 0
+}
+
+ui_back_item() {
+  ui_menu_item "0" "返回主菜单" "不执行本页操作" "$COLOR_DIM"
+}
+
 pause_for_enter() {
   has_interactive_input || return 0
-  printf "\n%s按回车返回菜单...%s" "$COLOR_DIM" "$COLOR_RESET"
+  printf "\n%s按回车返回主菜单...%s" "$COLOR_DIM" "$COLOR_RESET"
   if [ -e /dev/tty ] && (: < /dev/tty) 2>/dev/null; then
     IFS= read -r PROMPT_REPLY < /dev/tty || true
   else
@@ -3254,8 +3271,13 @@ run_client_optimization() {
   ui_mode_card "1" "重传优先" "适合游戏、语音、远程桌面。" "尽量把重传降到 0"
   ui_mode_card "2" "吞吐优先" "适合下载、备份、大文件。" "优先提升稳定传输速率"
   ui_mode_card "3" "快速起速" "适合网页、短连接、小文件。" "缩短连接初期的提速时间"
+  ui_back_item
   echo
-  if ! prompt_read "请选择优化目标 [1-3]："; then return 1; fi
+  if ! prompt_read "请选择优化目标 [1-3/0]："; then return 1; fi
+  if is_back_choice "$PROMPT_REPLY"; then
+    return_to_menu
+    return 0
+  fi
   case "$PROMPT_REPLY" in
     2) objective="throughput"; target_retr="10"; rounds="4" ;;
     3) objective="startup"; target_retr="5"; rounds="3" ;;
@@ -3267,10 +3289,15 @@ run_client_optimization() {
   ui_section "测试方向"
   ui_menu_item "1" "下载" "服务端 → 本机"
   ui_menu_item "2" "上传" "本机 → 服务端"
+  ui_back_item
   echo
   ui_note "当前选择" "$selected_label · 默认下载方向"
   ui_note "AI 说明" "此菜单使用确定性自动调参；AI 只在 AI自动优化 / AI测速 / AI诊断 命令中介入。"
-  if ! prompt_read "请选择测试方向 [1-2]："; then return 1; fi
+  if ! prompt_read "请选择测试方向 [1-2/0]："; then return 1; fi
+  if is_back_choice "$PROMPT_REPLY"; then
+    return_to_menu
+    return 0
+  fi
   case "$PROMPT_REPLY" in
     2) reverse="0" ;;
     *) reverse="1" ;;
@@ -3290,8 +3317,13 @@ run_client_ai_optimization() {
   ui_mode_card "1" "快速起速" "适合网页、短连接、小文件。" "缩短连接初期提速时间"
   ui_mode_card "2" "吞吐优先" "适合下载、备份、大文件。" "优先提高稳定传输速度"
   ui_mode_card "3" "重传优先" "适合游戏、语音、远程桌面。" "优先压低重传"
+  ui_back_item
   echo
-  if ! prompt_read "请选择 AI 调参目标 [1-3]："; then return 1; fi
+  if ! prompt_read "请选择 AI 调参目标 [1-3/0]："; then return 1; fi
+  if is_back_choice "$PROMPT_REPLY"; then
+    return_to_menu
+    return 0
+  fi
   case "$PROMPT_REPLY" in
     2) objective="throughput" ;;
     3) objective="retrans" ;;
@@ -3301,7 +3333,12 @@ run_client_ai_optimization() {
   echo
   ui_section "测试轮数"
   ui_note "建议" "OpenWrt 建议先用 2 轮，确认稳定后再增加轮数。"
-  if ! prompt_read "请输入 AI 调参轮数 [1-${TCP_TUNE_AI_MAX_ROUNDS}]，默认 2："; then return 1; fi
+  ui_back_item
+  if ! prompt_read "请输入 AI 调参轮数 [1-${TCP_TUNE_AI_MAX_ROUNDS}/0]，默认 2："; then return 1; fi
+  if is_back_choice "$PROMPT_REPLY"; then
+    return_to_menu
+    return 0
+  fi
   rounds="$PROMPT_REPLY"
   [ -n "$rounds" ] || rounds="2"
   validate_positive_int_range "$rounds" 1 "$TCP_TUNE_AI_MAX_ROUNDS" || {
@@ -3315,9 +3352,9 @@ run_client_ai_optimization() {
   ui_note "OpenWrt" "本机只做最小必要调整，不修改防火墙、DNS、代理或网络服务。"
   ui_note "依赖" "OpenWrt 不需要 python3；没有 python3 时会自动使用 curl 调用 AI 网关。"
   echo
-  if ! prompt_read "按回车开始 AI 智能调参，输入 n 取消："; then return 1; fi
+  if ! prompt_read "按回车开始 AI 智能调参，输入 0 返回主菜单："; then return 1; fi
   case "$PROMPT_REPLY" in
-    n|N) return 0 ;;
+    n|N|0|q|Q|b|B) return_to_menu; return 0 ;;
   esac
 
   # 这里复用命令行 AI 自动优化入口，避免面板和命令行维护两套调参逻辑。
@@ -3354,8 +3391,8 @@ client_menu() {
     fi
     ans="$PROMPT_REPLY"
     case "$ans" in
-      1) run_client_optimization "$host" "$iperf_port" "$allow_same_public"; pause_for_enter ;;
-      2) run_client_ai_optimization "$host" "$iperf_port"; pause_for_enter ;;
+      1) MENU_RETURNED="0"; run_client_optimization "$host" "$iperf_port" "$allow_same_public"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
+      2) MENU_RETURNED="0"; run_client_ai_optimization "$host" "$iperf_port"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
       3) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
       4) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
       5) clear_screen; print_header "过程记录"; get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
@@ -3411,17 +3448,21 @@ menu() {
     case "$ans" in
       1) listen_mode ;;
       2)
-        if ! prompt_read "请输入对端 Agent 地址：http://"; then pause_for_enter; continue; fi
+        if ! prompt_read "请输入对端 Agent 地址，输入 0 返回：http://"; then pause_for_enter; continue; fi
         peer_host="$PROMPT_REPLY"
-        if ! prompt_read "请输入 token："; then pause_for_enter; continue; fi
+        is_back_choice "$peer_host" && continue
+        if ! prompt_read "请输入 token，输入 0 返回："; then pause_for_enter; continue; fi
         token="$PROMPT_REPLY"
+        is_back_choice "$token" && continue
         join_mode --peer "http://$peer_host" --token "$token" --iperf-port "$IPERF_PORT"
         ;;
       3)
-        if ! prompt_read "请输入 iperf3 对端主机："; then pause_for_enter; continue; fi
+        if ! prompt_read "请输入 iperf3 对端主机，输入 0 返回："; then pause_for_enter; continue; fi
         host="$PROMPT_REPLY"
-        if ! prompt_read "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先："; then pause_for_enter; continue; fi
+        is_back_choice "$host" && continue
+        if ! prompt_read "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先 / 0 返回："; then pause_for_enter; continue; fi
         obj="$PROMPT_REPLY"
+        is_back_choice "$obj" && continue
         case "$obj" in
           1) objective="retrans" ;;
           2) objective="throughput" ;;
@@ -3432,17 +3473,22 @@ menu() {
         ;;
       4) clear_screen; print_header "状态"; status_full; pause_for_enter ;;
       5)
-        if ! prompt_read "请输入本地带宽 Mbps："; then pause_for_enter; continue; fi
+        if ! prompt_read "请输入本地带宽 Mbps，输入 0 返回："; then pause_for_enter; continue; fi
         local_mbps="$PROMPT_REPLY"
-        if ! prompt_read "请输入对端带宽 Mbps："; then pause_for_enter; continue; fi
+        is_back_choice "$local_mbps" && continue
+        if ! prompt_read "请输入对端带宽 Mbps，输入 0 返回："; then pause_for_enter; continue; fi
         peer_mbps="$PROMPT_REPLY"
-        if ! prompt_read "请输入 RTT 延迟 ms："; then pause_for_enter; continue; fi
+        is_back_choice "$peer_mbps" && continue
+        if ! prompt_read "请输入 RTT 延迟 ms，输入 0 返回："; then pause_for_enter; continue; fi
         rtt_ms="$PROMPT_REPLY"
-        if ! prompt_read "请输入内存 MiB，直接回车自动识别："; then pause_for_enter; continue; fi
+        is_back_choice "$rtt_ms" && continue
+        if ! prompt_read "请输入内存 MiB，直接回车自动识别，输入 0 返回："; then pause_for_enter; continue; fi
         mem_input="$PROMPT_REPLY"
+        is_back_choice "$mem_input" && continue
         [ -n "$mem_input" ] || mem_input="$(memory_mb)"
-        if ! prompt_read "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先："; then pause_for_enter; continue; fi
+        if ! prompt_read "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先 / 0 返回："; then pause_for_enter; continue; fi
         obj="$PROMPT_REPLY"
+        is_back_choice "$obj" && continue
         case "$obj" in
           1) objective="retrans" ;;
           2) objective="throughput" ;;
@@ -3460,8 +3506,11 @@ menu() {
         clear_screen
         print_header "TCP 预设"
         list_profiles
-        if ! prompt_read "请输入中文预设名或英文别名："; then pause_for_enter; continue; fi
+        echo
+        ui_back_item
+        if ! prompt_read "请输入中文预设名或英文别名，输入 0 返回："; then pause_for_enter; continue; fi
         profile="$PROMPT_REPLY"
+        is_back_choice "$profile" && continue
         apply_profile "$profile"
         pause_for_enter
         ;;
