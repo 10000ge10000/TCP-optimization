@@ -14,8 +14,8 @@ SESSION_TTL="${TCP_TUNE_SESSION_TTL:-1800}"
 DRY_RUN="${TCP_TUNE_DRY_RUN:-0}"
 LISTEN_PUBLIC_URL="${TCP_TUNE_PUBLIC_URL:-}"
 NVIDIA_BASE_URL="${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}"
-NVIDIA_MODEL="${NVIDIA_MODEL:-auto}"
-TCP_TUNE_AI_TIMEOUT="${TCP_TUNE_AI_TIMEOUT:-20}"
+NVIDIA_MODEL="${NVIDIA_MODEL:-minimaxai/minimax-m2.7}"
+TCP_TUNE_AI_TIMEOUT="${TCP_TUNE_AI_TIMEOUT:-90}"
 TCP_TUNE_AI_MAX_ROUNDS="${TCP_TUNE_AI_MAX_ROUNDS:-5}"
 TCP_TUNE_AI_RETRIES="${TCP_TUNE_AI_RETRIES:-4}"
 TCP_TUNE_AI_CURL_IP_FAMILY="${TCP_TUNE_AI_CURL_IP_FAMILY:--4}"
@@ -26,7 +26,7 @@ TCP_TUNE_DEFAULT_AI_GATEWAY_URL="${TCP_TUNE_DEFAULT_AI_GATEWAY_URL:-https://tcp-
 if [ -z "${NVIDIA_API_KEY:-}" ] && [ -z "$TCP_TUNE_AI_GATEWAY_URL" ]; then
   TCP_TUNE_AI_GATEWAY_URL="$TCP_TUNE_DEFAULT_AI_GATEWAY_URL"
 fi
-AI_MODEL_CANDIDATES="${TCP_TUNE_AI_MODELS:-minimaxai/minimax-m3 moonshotai/kimi-k2.6 minimaxai/minimax-m2.7 z-ai/glm-5.1}"
+AI_MODEL_CANDIDATES="${TCP_TUNE_AI_MODELS:-minimaxai/minimax-m2.7 minimaxai/minimax-m3 moonshotai/kimi-k2.6 z-ai/glm-5.1}"
 VPS_ADAPT_FILE="${TCP_TUNE_VPS_ADAPT_FILE:-/etc/sysctl.d/98-tcp-ipv6-openwrt-peer.conf}"
 OPENWRT_MINIMAL_FILE="${TCP_TUNE_OPENWRT_MINIMAL_FILE:-/etc/sysctl.d/zz-tcp-ipv6-local-peer.conf}"
 LAST_MANUAL_BACKUP=""
@@ -1455,7 +1455,7 @@ EOF
   [ "$max_attempts" -lt 1 ] && max_attempts=1
   while [ "$attempt" -le "$max_attempts" ]; do
     if [ -n "$auth_header" ]; then
-      curl -fsS $curl_ip_arg --connect-timeout 10 --retry 1 --retry-delay 1 --max-time "$TCP_TUNE_AI_TIMEOUT" \
+      curl -fs $curl_ip_arg --connect-timeout 10 --retry 1 --retry-delay 1 --max-time "$TCP_TUNE_AI_TIMEOUT" \
         -H "Content-Type: application/json" \
         -H "Accept: application/json" \
         -H "User-Agent: TCP-optimization/1.0" \
@@ -1463,7 +1463,7 @@ EOF
         -d "$body" \
         "$base_url/chat/completions" && return 0
     else
-      curl -fsS $curl_ip_arg --connect-timeout 10 --retry 1 --retry-delay 1 --max-time "$TCP_TUNE_AI_TIMEOUT" \
+      curl -fs $curl_ip_arg --connect-timeout 10 --retry 1 --retry-delay 1 --max-time "$TCP_TUNE_AI_TIMEOUT" \
         -H "Content-Type: application/json" \
         -H "Accept: application/json" \
         -H "User-Agent: TCP-optimization/1.0" \
@@ -1522,6 +1522,10 @@ ai_curl_client() {
       objective="$2"
       role="$3"
       summary="$(cat)"
+      upload_bps="$(printf '%s' "$summary" | json_number_field upload_bits_per_second 0)"
+      upload_retr="$(printf '%s' "$summary" | json_number_field upload_retransmits 0)"
+      download_bps="$(printf '%s' "$summary" | json_number_field download_bits_per_second 0)"
+      download_retr="$(printf '%s' "$summary" | json_number_field download_retransmits 0)"
       max_notsent="$(ai_max_notsent)"
       prompt="$(cat <<EOF
 You are a conservative TCP tuning controller. Return only one JSON object. Do not include shell commands.
@@ -1530,13 +1534,13 @@ Allowed integer fields: mtu_probing 0/1, slow_start_after_idle 0/1, rmem_max,wme
 OpenWrt may only use minimal=true plus mtu_probing, slow_start_after_idle, notsent_lowat, limit_output_bytes.
 Objective: $objective
 Role: $role
+Measurements: upload_bps=$upload_bps, upload_retransmits=$upload_retr, download_bps=$download_bps, download_retransmits=$download_retr.
 Prefer VPS-side adaptation. For high VPS->OpenWrt retransmits with good throughput, prefer cubic-safe. For OpenWrt upload bottlenecks that remain low across tests, do not over-increase buffers.
-Return JSON shape: {"vps":{"congestion":"cubic","mtu_probing":1,"slow_start_after_idle":0,"rmem_max":67108864,"wmem_max":67108864,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"openwrt":{"minimal":true,"mtu_probing":1,"slow_start_after_idle":0,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"reason":"short Chinese reason"}.
-Summary JSON:
-$summary
+Your entire response must begin with { and end with }.
+Return only this decision JSON schema: {"vps":{"congestion":"cubic","mtu_probing":1,"slow_start_after_idle":0,"rmem_max":67108864,"wmem_max":67108864,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"openwrt":{"minimal":true,"mtu_probing":1,"slow_start_after_idle":0,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"reason":"short Chinese reason"}.
 EOF
 )"
-      response="$(ai_curl_post_chat "$model" "$prompt" 512)"
+      response="$(ai_curl_post_chat "$model" "$prompt" 4096)"
       content="$(printf '%s' "$response" | ai_content_from_response)"
       printf '%s' "$content" | extract_json_object_text
       ;;
@@ -1659,15 +1663,37 @@ def post_chat(model, messages, max_tokens=256):
 
 def extract_json(text):
     text = text.strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
     if fenced:
         text = fenced.group(1)
     else:
         start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start:end + 1]
-    return json.loads(text)
+        if start >= 0:
+            depth = 0
+            in_string = False
+            escaped = False
+            end = -1
+            for idx, ch in enumerate(text[start:], start):
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif ch == "\\":
+                        escaped = True
+                    elif ch == '"':
+                        in_string = False
+                else:
+                    if ch == '"':
+                        in_string = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = idx
+                            break
+            if end >= start:
+                text = text[start:end + 1]
+    return json.loads(text, strict=False)
 
 if mode == "benchmark":
     models = sys.argv[2:]
@@ -1712,6 +1738,14 @@ elif mode == "decide":
     objective = sys.argv[3]
     role = sys.argv[4]
     summary = sys.stdin.read()
+    try:
+        metrics = json.loads(summary)
+    except Exception:
+        metrics = {}
+    upload_bps = metrics.get("upload_bits_per_second", 0)
+    upload_retr = metrics.get("upload_retransmits", 0)
+    download_bps = metrics.get("download_bits_per_second", 0)
+    download_retr = metrics.get("download_retransmits", 0)
     max_notsent = int(os.environ.get("TCP_TUNE_AI_MAX_NOTSENT", "1048576"))
     max_notsent = max(16384, min(2147483647, max_notsent))
     system = (
@@ -1726,15 +1760,18 @@ elif mode == "decide":
     )
     user = (
         "Objective: " + objective + "\nRole: " + role + "\n"
+        f"Measurements: upload_bps={upload_bps}, upload_retransmits={upload_retr}, "
+        f"download_bps={download_bps}, download_retransmits={download_retr}.\n"
         "Prefer VPS-side adaptation. For high VPS->OpenWrt retransmits with good throughput, prefer cubic-safe. "
         "For OpenWrt upload bottlenecks that remain low across tests, do not over-increase buffers.\n"
-        "Return JSON shape: {\"vps\":{\"congestion\":\"cubic\",\"mtu_probing\":1,\"slow_start_after_idle\":0,"
+        "Your entire response must begin with { and end with }. "
+        "Return only this decision JSON schema: {\"vps\":{\"congestion\":\"cubic\",\"mtu_probing\":1,\"slow_start_after_idle\":0,"
         f"\"rmem_max\":67108864,\"wmem_max\":67108864,\"notsent_lowat\":{max_notsent},"
         "\"limit_output_bytes\":1048576},\"openwrt\":{\"minimal\":true,\"mtu_probing\":1,"
-        f"\"slow_start_after_idle\":0,\"notsent_lowat\":{max_notsent},\"limit_output_bytes\":1048576},"
-        "\"reason\":\"short Chinese reason\"}.\nSummary JSON:\n" + summary
+        f"\"slow_start_after_idle\":0,\"notsent_lowat\":{max_notsent},\"limit_output_bytes\":1048576}},"
+        "\"reason\":\"short Chinese reason\"}."
     )
-    content = post_chat(model, [{"role": "system", "content": system}, {"role": "user", "content": user}], 512)
+    content = post_chat(model, [{"role": "system", "content": system}, {"role": "user", "content": user}], 4096)
     print(json.dumps(extract_json(content), ensure_ascii=False, separators=(",", ":")))
 elif mode == "normalize":
     role = sys.argv[2]
@@ -1924,11 +1961,43 @@ ai_decision_for_summary() {
   objective="$2"
   role="$3"
   model="$4"
-  prompt_summary="$(cat <<EOF
-{"objective":"$objective","role":"$role","os":"${OS_NAME:-unknown}","family":"${OS_FAMILY:-unknown}","metrics":$summary,"current":{"congestion":"$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)","qdisc":"$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)","rmem_max":$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0),"wmem_max":$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0),"notsent_lowat":$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo 0),"limit_output_bytes":$(sysctl -n net.ipv4.tcp_limit_output_bytes 2>/dev/null || echo 0)}}
-EOF
-)"
+  prompt_summary="$summary"
   printf '%s' "$prompt_summary" | ai_python_client decide "$model" "$objective" "$role"
+}
+
+ai_fallback_decision_json() {
+  objective="$1"
+  role="$2"
+  max_notsent="$(ai_max_notsent)"
+  case "$objective" in
+    throughput)
+      vps_cc="bbr"
+      op_notsent="$max_notsent"
+      op_limit="1048576"
+      ;;
+    retrans)
+      vps_cc="cubic"
+      op_notsent="262144"
+      op_limit="262144"
+      ;;
+    *)
+      vps_cc="bbr"
+      op_notsent="131072"
+      op_limit="262144"
+      ;;
+  esac
+  case "$role" in
+    openwrt)
+      cat <<EOF
+{"openwrt":{"minimal":true,"mtu_probing":1,"slow_start_after_idle":0,"notsent_lowat":$op_notsent,"limit_output_bytes":$op_limit},"reason":"AI 网关超时，已使用内置保守策略继续。"}
+EOF
+      ;;
+    *)
+      cat <<EOF
+{"vps":{"congestion":"$vps_cc","mtu_probing":1,"slow_start_after_idle":0,"rmem_max":67108864,"wmem_max":67108864,"notsent_lowat":$max_notsent,"limit_output_bytes":1048576},"reason":"AI 网关超时，已使用内置保守策略继续。"}
+EOF
+      ;;
+  esac
 }
 
 apply_ai_decision() {
@@ -1993,7 +2062,12 @@ ai_auto_mode() {
   ui_row "轮数" "$rounds"
   ui_note "安全边界" "AI 不能执行任意命令，只能触发脚本内置白名单动作。"
 
-  model="$(ai_select_model)" || die "没有可用 AI 模型。"
+  if model="$(ai_select_model 2>/dev/null)"; then
+    :
+  else
+    model="内置保守策略"
+    warn "AI 网关暂时不可用，将使用内置保守策略继续。"
+  fi
   ui_row "模型" "$model"
 
   round=1
@@ -2003,8 +2077,19 @@ ai_auto_mode() {
     ui_section "第 $round/$rounds 轮基线"
     summary="$(ai_measure_pair "$host" "$port" "$seconds")"
     print_ai_summary_metrics "测速摘要" "$summary"
-    decision="$(ai_decision_for_summary "$summary" "$objective" "$role" "$model")" || die "AI 决策请求失败。"
-    normalized_decision="$(printf '%s' "$decision" | ai_python_client normalize "$role")" || die "AI 决策解析失败。"
+    if [ "$model" = "内置保守策略" ]; then
+      decision="$(ai_fallback_decision_json "$objective" "$role")"
+      ui_note "AI 状态" "未连接到 AI 网关，本轮使用内置保守策略。"
+    elif decision="$(ai_decision_for_summary "$summary" "$objective" "$role" "$model" 2>/dev/null)"; then
+      :
+    else
+      decision="$(ai_fallback_decision_json "$objective" "$role")"
+      ui_note "AI 状态" "AI 网关超时或返回异常，本轮使用内置保守策略。"
+    fi
+    normalized_decision="$(printf '%s' "$decision" | ai_python_client normalize "$role" 2>/dev/null)" || {
+      decision="$(ai_fallback_decision_json "$objective" "$role")"
+      normalized_decision="$(printf '%s' "$decision" | ai_python_client normalize "$role")" || die "内置策略解析失败。"
+    }
     print_ai_decision_summary "$role" "$normalized_decision"
     previous_summary="$summary"
     previous_backup="$LAST_MANUAL_BACKUP"
@@ -2046,9 +2131,13 @@ ai_diagnose_mode() {
   [ -f "$summary_file" ] || die "summary 文件不存在：$summary_file"
   ai_require_env
   detect_os
-  model="$(ai_select_model)" || die "没有可用 AI 模型。"
   summary="$(cat "$summary_file")"
-  ai_decision_for_summary "$summary" "$objective" "$role" "$model"
+  if model="$(ai_select_model 2>/dev/null)"; then
+    ai_decision_for_summary "$summary" "$objective" "$role" "$model" 2>/dev/null || ai_fallback_decision_json "$objective" "$role"
+  else
+    warn "AI 网关暂时不可用，输出内置保守策略。"
+    ai_fallback_decision_json "$objective" "$role"
+  fi
 }
 
 status_short() {
@@ -3555,7 +3644,8 @@ $APP_NAME $APP_VERSION
 AI 环境变量：
   NVIDIA_API_KEY    必填，只从环境变量读取，不写入仓库或日志
   NVIDIA_BASE_URL   默认 https://integrate.api.nvidia.com/v1
-  NVIDIA_MODEL      默认 auto，会在候选模型中选择最快可用项
+  NVIDIA_MODEL      默认 minimaxai/minimax-m2.7；设为 auto 时会在候选模型中选择可用项
+  TCP_TUNE_AI_TIMEOUT 默认 90 秒，适配 m2.7 完整 JSON 决策输出
 EOF
 }
 

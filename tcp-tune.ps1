@@ -20,7 +20,8 @@ $RepoUrl = "https://github.com/10000ge10000/TCP-optimization"
 $ToolRoot = Join-Path $env:LOCALAPPDATA "TCP-optimization"
 $IperfCacheDir = Join-Path $ToolRoot "iperf3"
 $DefaultAiGatewayUrl = "https://tcp-optimization-ai-gateway.10454728.workers.dev/v1"
-$AiModelCandidates = @("minimaxai/minimax-m3", "moonshotai/kimi-k2.6", "minimaxai/minimax-m2.7", "z-ai/glm-5.1")
+$DefaultAiModel = "minimaxai/minimax-m2.7"
+$AiModelCandidates = @("minimaxai/minimax-m2.7", "minimaxai/minimax-m3", "moonshotai/kimi-k2.6", "z-ai/glm-5.1")
 
 # 显示宽度感知的 padding：中文字符占 2 列，ASCII 占 1 列
 function Format-Pad {
@@ -398,7 +399,7 @@ function Invoke-AIChat {
     temperature = 0
     max_tokens = $MaxTokens
   } | ConvertTo-Json -Depth 8
-  $timeout = 30
+  $timeout = 90
   if ($env:TCP_TUNE_AI_TIMEOUT) { $timeout = [int]$env:TCP_TUNE_AI_TIMEOUT }
   for ($attempt = 1; $attempt -le 3; $attempt++) {
     try {
@@ -420,6 +421,7 @@ function Invoke-AIChat {
 
 function Select-AIModel {
   if ($env:NVIDIA_MODEL -and $env:NVIDIA_MODEL -ne "auto") { return $env:NVIDIA_MODEL }
+  if (-not $env:NVIDIA_MODEL) { return $DefaultAiModel }
   foreach ($model in $AiModelCandidates) {
     try {
       $ok = Invoke-AIChat -Model $model -Prompt "Return only OK." -MaxTokens 16
@@ -499,7 +501,7 @@ Do not suggest shell commands. Windows client should not auto-write TCP stack.
 Objective: $objectiveName
 Metrics: $summary
 "@
-  $decision = ConvertFrom-AIJson (Invoke-AIChat -Model $model -Prompt $prompt -MaxTokens 256)
+  $decision = ConvertFrom-AIJson (Invoke-AIChat -Model $model -Prompt $prompt -MaxTokens 4096)
   Write-Host ""
   Write-Section "AI 建议摘要"
   Write-MetricLine "模型" $model "Cyan"
