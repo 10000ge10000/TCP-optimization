@@ -57,6 +57,7 @@ function Write-Header {
 function Write-KeyValue {
   param([string]$Label, [string]$Value)
   $padded = Format-Pad -Text $Label -Width 12
+  $Value = Format-DisplayText -Text $Value
   Write-Host "  $padded  $Value"
 }
 
@@ -67,6 +68,7 @@ function Write-PanelRule {
 function Write-PanelRow {
   param([string]$Label, [string]$Value)
   $padded = Format-Pad -Text $Label -Width 12
+  $Value = Format-DisplayText -Text $Value
   Write-Host "  $padded  $Value"
 }
 
@@ -78,6 +80,7 @@ function Write-Section {
 function Write-Note {
   param([string]$Label, [string]$Text)
   $padded = Format-Pad -Text $Label -Width 12
+  $Text = Format-DisplayText -Text $Text
   Write-Host "  $padded  $Text" -ForegroundColor DarkGray
 }
 
@@ -135,6 +138,18 @@ function Repair-DisplayText {
     }
   }
   return $Text
+}
+
+function Format-DisplayText {
+  param([string]$Text, [int]$MaxWidth = 58)
+  if (-not $Text) { return "" }
+  try {
+    if ($Host.UI.RawUI.WindowSize.Width -ge 90) { return $Text }
+  } catch {
+    return $Text
+  }
+  if ($Text.Length -le $MaxWidth) { return $Text }
+  return $Text.Substring(0, [Math]::Max(0, $MaxWidth - 3)) + "..."
 }
 
 function Get-PercentDelta {
@@ -220,6 +235,42 @@ function Ensure-Command {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
     throw "缺少命令：$Name。请安装 Windows 版 iperf3 并加入 PATH。"
   }
+}
+
+function Get-PresetProfiles {
+  return @(
+    [pscustomobject]@{ Index = "1"; Name = "近距轻载"; Rtt = "RTT < 30ms"; Rmem = "64MiB"; Wmem = "32MiB"; Comment = "低延迟链路，优先控制发送队列和重传。" },
+    [pscustomobject]@{ Index = "2"; Name = "近距高速"; Rtt = "RTT 30~70ms"; Rmem = "64MiB"; Wmem = "64MiB"; Comment = "同区域或精品线路，适合较高下行和稳定短中距链路。" },
+    [pscustomobject]@{ Index = "3"; Name = "中距均衡"; Rtt = "RTT 70~130ms"; Rmem = "约 85MiB"; Wmem = "约 41MiB"; Comment = "跨境中等延迟，接收缓冲略大于发送缓冲。" },
+    [pscustomobject]@{ Index = "4"; Name = "长距增强"; Rtt = "RTT 130~190ms"; Rmem = "约 100MiB"; Wmem = "约 48MiB"; Comment = "亚太/跨海高带宽链路，适合较大 BDP。" },
+    [pscustomobject]@{ Index = "5"; Name = "远距大带宽"; Rtt = "RTT > 190ms"; Rmem = "约 178MiB"; Wmem = "约 85MiB"; Comment = "欧美等高延迟链路，缓冲更大，低内存设备需谨慎。" }
+  )
+}
+
+function Get-RttMilliseconds {
+  param([string]$HostName)
+  try {
+    $samples = Test-Connection -ComputerName $HostName -Count 3 -ErrorAction Stop
+    $values = foreach ($sample in $samples) {
+      if ($null -ne $sample.ResponseTime) { [double]$sample.ResponseTime }
+      elseif ($null -ne $sample.Latency) { [double]$sample.Latency }
+    }
+    if ($values) { return [int](($values | Measure-Object -Average).Average) }
+  } catch {
+  }
+  return 0
+}
+
+function Select-PresetByProbe {
+  param([int]$RttMs, [Int64]$Retransmits, [double]$DownloadBitsPerSecond)
+  if ($RttMs -lt 30) { $index = 1 }
+  elseif ($RttMs -lt 70) { $index = 2 }
+  elseif ($RttMs -lt 130) { $index = 3 }
+  elseif ($RttMs -lt 190) { $index = 4 }
+  else { $index = 5 }
+  if ($Retransmits -gt 500 -and $index -gt 1) { $index-- }
+  if ($DownloadBitsPerSecond -gt 0 -and $DownloadBitsPerSecond -lt 20000000 -and $index -gt 3) { $index = 3 }
+  return (Get-PresetProfiles | Where-Object { $_.Index -eq "$index" } | Select-Object -First 1)
 }
 
 function Get-CachedIperf3 {
@@ -513,6 +564,67 @@ Metrics: $summary
   return $true
 }
 
+function Invoke-WindowsPresetAssessment {
+  param([string]$PeerUrl, [string]$TokenValue, [string]$HostName, [int]$Port, [string]$LocalAddress)
+  Write-Header "预制参数评估"
+  Write-Subtitle "Windows 端只做测速和推荐，不自动修改 Windows TCP 栈。"
+  Write-Host ""
+  Write-Section "检测中"
+  Write-Note "动作" "正在检测 RTT、iperf3 上传/下载、重传和首秒速度..."
+
+  $rtt = Get-RttMilliseconds -HostName $HostName
+  $upload = Get-IperfMetrics -Result (Run-Iperf -HostName $HostName -Port $Port -LocalAddress $LocalAddress)
+  $download = Get-IperfMetrics -Result (Run-Iperf -HostName $HostName -Port $Port -LocalAddress $LocalAddress -Reverse)
+  $totalRetr = $upload.Retransmits + $download.Retransmits
+  $recommended = Select-PresetByProbe -RttMs $rtt -Retransmits $totalRetr -DownloadBitsPerSecond $download.BitsPerSecond
+
+  Invoke-AgentPost -Url "$PeerUrl/report" -TokenValue $TokenValue -Body ([pscustomobject]@{
+    role = "windows-preset-assessment"
+    lan_ip = $LocalAddress
+    stage = "preset-probe"
+    result = "ok"
+    detail = $recommended.Name
+    bits_per_second = [Math]::Max($upload.BitsPerSecond, $download.BitsPerSecond)
+    retransmits = $totalRetr
+    first_second_bits_per_second = [Math]::Max($upload.FirstSecondBitsPerSecond, $download.FirstSecondBitsPerSecond)
+    time = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  }) | Out-Null
+
+  Write-Header "预制参数评估"
+  Write-Section "检测结果"
+  Write-PanelRow "本机地址" $LocalAddress
+  Write-PanelRow "RTT" ("{0}ms" -f $rtt)
+  Write-PanelRow "上传" ("{0} / 重传 {1:N0} 次 / 首秒 {2}" -f (Format-Rate $upload.BitsPerSecond), $upload.Retransmits, (Format-Rate $upload.FirstSecondBitsPerSecond))
+  Write-PanelRow "下载" ("{0} / 重传 {1:N0} 次 / 首秒 {2}" -f (Format-Rate $download.BitsPerSecond), $download.Retransmits, (Format-Rate $download.FirstSecondBitsPerSecond))
+  Write-Host ""
+  Write-Section "推荐挡位"
+  Write-PanelRow "预设挡位" $recommended.Name
+  Write-PanelRow "适用范围" $recommended.Rtt
+  Write-PanelRow "接收缓冲" $recommended.Rmem
+  Write-PanelRow "发送缓冲" $recommended.Wmem
+  Write-Note "说明" $recommended.Comment
+  Write-Host ""
+  Write-Section "可选挡位"
+  foreach ($profile in Get-PresetProfiles) {
+    Write-MenuItem $profile.Index $profile.Name ("{0} / 接收 {1} / 发送 {2}" -f $profile.Rtt, $profile.Rmem, $profile.Wmem)
+  }
+  Write-Host ""
+  Write-Note "Windows" "这里只提供评估建议，不自动写入系统 TCP 参数。"
+  return $true
+}
+
+function Show-AgentEventSummary {
+  param([string]$PeerUrl, [string]$TokenValue)
+  $data = Invoke-AgentGet -Url "$PeerUrl/events" -TokenValue $TokenValue
+  if ($data.summaries -and $data.summaries.Count -gt 0) {
+    foreach ($line in $data.summaries) {
+      Write-Host "  $line"
+    }
+    return
+  }
+  Write-Host "  暂无过程记录。" -ForegroundColor DarkGray
+}
+
 function Show-ClientDashboard {
   param([string]$LocalAddress, [int]$Port)
   Write-Header "TCP 双端调优器 · 客户端"
@@ -694,26 +806,31 @@ function Invoke-ClientMenu {
     Write-Host ""
     Write-Section "操作菜单"
     Write-MenuGroup "优化"
-    Write-MenuItem "1" "开始优化" "重传 / 吞吐 / 快速起速" "Green"
-    Write-MenuItem "2" "AI 智能调参" "AI 辅助：快速起速 / 吞吐 / 重传" "Cyan"
+    Write-MenuItem "0" "预制参数评估" "先检测双端基础信息，再推荐五档参数" "Yellow"
+    Write-MenuItem "1" "稳定自动优化" "不用 AI，规则固定，自动测速迭代" "Green"
+    Write-MenuItem "2" "AI 智能优化" "AI 给建议，脚本按白名单执行" "Cyan"
     Write-Host ""
     Write-MenuGroup "状态"
     Write-MenuItem "3" "查看本机状态" "系统 / TCP 参数"
     Write-MenuItem "4" "查看服务端状态" "会话 / 测速服务"
-    Write-MenuItem "5" "查看过程记录" "任务 / 结果"
+    Write-MenuItem "5" "查看过程记录" "中文摘要日志"
     Write-Host ""
     Write-MenuGroup "退出"
-    Write-MenuItem "6" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
-    Write-MenuItem "0" "退出客户端" "不停止服务端会话" "DarkGray"
+    Write-MenuItem "6" "回滚最近修改" "Windows 端不自动写入，仅提示说明" "Yellow"
+    Write-MenuItem "7" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
+    Write-MenuItem "q" "退出客户端" "不停止服务端会话" "DarkGray"
     $choice = Read-Host "请选择"
     switch ($choice) {
+      "0" { if (Invoke-WindowsPresetAssessment -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
       "1" { if (Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
       "2" { if (Invoke-WindowsAITuning -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
       "3" { & $PSCommandPath status; Read-Host "按回车返回主菜单" | Out-Null }
       "4" { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回主菜单" | Out-Null }
-      "5" { Invoke-AgentGet -Url "$PeerUrl/events" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回主菜单" | Out-Null }
-      "6" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
-      "0" { return }
+      "5" { Show-AgentEventSummary -PeerUrl $PeerUrl -TokenValue $TokenValue; Read-Host "按回车返回主菜单" | Out-Null }
+      "6" { Write-Host "Windows 端默认没有自动写入 TCP 参数，无需回滚。" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
+      "7" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
+      "q" { return }
+      "Q" { return }
       default { Write-Host "无效选择。" -ForegroundColor Yellow }
     }
   }

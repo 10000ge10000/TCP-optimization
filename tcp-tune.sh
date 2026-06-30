@@ -153,6 +153,9 @@ ui_rule() {
 ui_row() {
   label="$1"
   value="$2"
+  if is_narrow_terminal && [ "${#value}" -gt 52 ]; then
+    value="$(printf '%s' "$value" | cut -c 1-49)..."
+  fi
   printf "  %s%s%s  %s\n" "$COLOR_BOLD" "$(ui_pad "$label" 12)" "$COLOR_RESET" "$value"
 }
 
@@ -164,12 +167,25 @@ ui_section() {
 ui_note() {
   label="$1"
   text="$2"
+  if is_narrow_terminal && [ "${#text}" -gt 52 ]; then
+    text="$(printf '%s' "$text" | cut -c 1-49)..."
+  fi
   printf "  %s%s%s  %s%s%s\n" "$COLOR_DIM" "$(ui_pad "$label" 12)" "$COLOR_RESET" "$COLOR_DIM" "$text" "$COLOR_RESET"
 }
 
 ui_subtitle() {
   text="$1"
   printf "  %s%s%s\n" "$COLOR_DIM" "$text" "$COLOR_RESET"
+}
+
+terminal_cols() {
+  cols="$(tput cols 2>/dev/null || echo 120)"
+  is_unsigned_integer "$cols" || cols=120
+  echo "$cols"
+}
+
+is_narrow_terminal() {
+  [ "$(terminal_cols)" -lt 90 ]
 }
 
 ui_mode_card() {
@@ -481,28 +497,19 @@ install_only() {
 
 profile_exists() {
   case "$1" in
-    "超近距极速"|"近距均衡"|"近距极速"|"中距穿越"|"亚太长距"|"远距穿透"|"超远距极限") return 0 ;;
-    ultra-close|near-balance|near-speed|mid-cross|apac-long|far-punch|ultra-far) return 0 ;;
-    "稳健入门"|"均衡通用"|"中距增强"|"高带宽增强"|"长距大带宽") return 0 ;;
-    stable|balanced|medium|boost|longhaul) return 0 ;;
+    "近距轻载"|"近距高速"|"中距均衡"|"长距增强"|"远距大带宽") return 0 ;;
+    near-light|near-fast|mid-balance|long-boost|far-bandwidth) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 normalize_profile() {
   case "$1" in
-    "超近距极速"|ultra-close) echo "超近距极速" ;;
-    "近距均衡"|near-balance) echo "近距均衡" ;;
-    "近距极速"|near-speed) echo "近距极速" ;;
-    "中距穿越"|mid-cross) echo "中距穿越" ;;
-    "亚太长距"|apac-long) echo "亚太长距" ;;
-    "远距穿透"|far-punch) echo "远距穿透" ;;
-    "超远距极限"|ultra-far) echo "超远距极限" ;;
-    "稳健入门"|stable) echo "近距均衡" ;;
-    "均衡通用"|balanced) echo "近距极速" ;;
-    "中距增强"|medium) echo "中距穿越" ;;
-    "高带宽增强"|boost) echo "亚太长距" ;;
-    "长距大带宽"|longhaul) echo "远距穿透" ;;
+    "近距轻载"|near-light) echo "近距轻载" ;;
+    "近距高速"|near-fast) echo "近距高速" ;;
+    "中距均衡"|mid-balance) echo "中距均衡" ;;
+    "长距增强"|long-boost) echo "长距增强" ;;
+    "远距大带宽"|far-bandwidth) echo "远距大带宽" ;;
     *) die "未知预设：$1" ;;
   esac
 }
@@ -512,27 +519,41 @@ profile_values() {
   # 输出: file_max rmem_max wmem_max rmem_min rmem_default rmem_max
   #        wmem_min wmem_default wmem_max adv_win_scale notsent_lowat
   case "$name" in
-    "超近距极速")
-      echo "6815744 33554432 33554432 4096 87380 33554432 4096 16384 33554432 1 32768"
-      ;;
-    "近距均衡")
+    "近距轻载")
       echo "6815744 67108864 33554432 4096 87380 67108864 4096 16384 33554432 1 49152"
       ;;
-    "近距极速")
+    "近距高速")
       echo "6815744 67108864 67108864 4096 87380 67108864 4096 16384 67108864 1 65536"
       ;;
-    "中距穿越")
+    "中距均衡")
       echo "6815744 89653247 43033559 8192 87380 89653247 8192 65536 43033559 1 98304"
       ;;
-    "亚太长距")
+    "长距增强")
       echo "6815744 105062399 50429951 8192 87380 105062399 8192 65536 50429951 1 131072"
       ;;
-    "远距穿透")
+    "远距大带宽")
       echo "6815744 186777599 89653247 8192 87380 186777599 8192 65536 89653247 1 196608"
       ;;
-    "超远距极限")
-      echo "6815744 268435456 134217728 8192 87380 268435456 8192 65536 134217728 1 262144"
-      ;;
+  esac
+}
+
+profile_rtt_hint() {
+  case "$(normalize_profile "$1")" in
+    "近距轻载") echo "RTT < 30ms" ;;
+    "近距高速") echo "RTT 30~70ms" ;;
+    "中距均衡") echo "RTT 70~130ms" ;;
+    "长距增强") echo "RTT 130~190ms" ;;
+    "远距大带宽") echo "RTT > 190ms" ;;
+  esac
+}
+
+profile_comment() {
+  case "$(normalize_profile "$1")" in
+    "近距轻载") echo "低延迟链路，优先控制发送队列和重传。" ;;
+    "近距高速") echo "同区域或精品线路，适合较高下行和稳定短中距链路。" ;;
+    "中距均衡") echo "跨境中等延迟，接收缓冲略大于发送缓冲。" ;;
+    "长距增强") echo "亚太/跨海高带宽链路，适合较大 BDP。" ;;
+    "远距大带宽") echo "欧美等高延迟链路，缓冲更大，低内存设备需谨慎。" ;;
   esac
 }
 
@@ -608,29 +629,63 @@ list_profiles() {
   cat <<'EOF'
 TCP 预设（按距离/延迟从近到远排列）：
 
-1. 超近距极速  (RTT < 10ms, 同城/同机房)
-   接收 32MiB / 发送 32MiB，小缓冲极低延迟，适合局域网或同机房。
+1. 近距轻载    (RTT < 30ms)
+   接收 64MiB / 发送 32MiB。低延迟链路，优先控制发送队列和重传。
 
-2. 近距均衡    (RTT 10~30ms, 近距精品线路)
-   接收 64MiB / 发送 32MiB，保守非对称，适合省际精品链路。
+2. 近距高速    (RTT 30~70ms)
+   接收 64MiB / 发送 64MiB。同区域或精品线路，适合较高下行和稳定短中距链路。
 
-3. 近距极速    (RTT 30~60ms, 同区域)
-   接收 64MiB / 发送 64MiB，对称大缓冲，适合日韩/东南亚低延迟链路。
+3. 中距均衡    (RTT 70~130ms)
+   接收约 85MiB / 发送约 41MiB。跨境中等延迟，接收缓冲略大于发送缓冲。
 
-4. 中距穿越    (RTT 60~120ms, 港区跨境)
-   接收约 85MiB / 发送约 41MiB，适合香港中转、中等 RTT 链路。
+4. 长距增强    (RTT 130~190ms)
+   接收约 100MiB / 发送约 48MiB。亚太/跨海高带宽链路，适合较大 BDP。
 
-5. 亚太长距    (RTT 120~180ms, 跨境高带宽)
-   接收约 100MiB / 发送约 48MiB，适合亚太区高带宽跨海链路。
+5. 远距大带宽  (RTT > 190ms)
+   接收约 178MiB / 发送约 85MiB。欧美等高延迟链路，缓冲更大，低内存设备需谨慎。
 
-6. 远距穿透    (RTT 180~250ms, 欧美)
-   接收约 178MiB / 发送约 85MiB，适合欧美方向高 RTT 大 BDP 链路。
-
-7. 超远距极限  (RTT > 250ms, 极远距)
-   接收约 256MiB / 发送约 128MiB，适合非洲/南美等极端高延迟链路。
-
-英文别名: ultra-close, near-balance, near-speed, mid-cross, apac-long, far-punch, ultra-far
+英文别名: near-light, near-fast, mid-balance, long-boost, far-bandwidth
 EOF
+}
+
+profile_summary() {
+  profile="$(normalize_profile "$1")"
+  values="$(profile_values "$profile")"
+  # shellcheck disable=SC2086
+  set -- $values
+  rmem_max="$2"
+  wmem_max="$3"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$profile" "$(profile_rtt_hint "$profile")" "$rmem_max" "$wmem_max" "$(profile_comment "$profile")"
+}
+
+format_mib() {
+  bytes="${1:-0}"
+  awk -v b="$bytes" 'BEGIN { printf "%.0fMiB", b / 1048576 }'
+}
+
+print_profile_summary() {
+  profile="$(normalize_profile "$1")"
+  values="$(profile_values "$profile")"
+  # shellcheck disable=SC2086
+  set -- $values
+  rmem_max="$2"
+  wmem_max="$3"
+  ui_row "预设挡位" "$profile"
+  ui_row "适用范围" "$(profile_rtt_hint "$profile")"
+  ui_row "接收缓冲" "$(format_mib "$rmem_max")"
+  ui_row "发送缓冲" "$(format_mib "$wmem_max")"
+  ui_note "说明" "$(profile_comment "$profile")"
+}
+
+preset_by_number() {
+  case "$1" in
+    1) echo "近距轻载" ;;
+    2) echo "近距高速" ;;
+    3) echo "中距均衡" ;;
+    4) echo "长距增强" ;;
+    5) echo "远距大带宽" ;;
+    *) return 1 ;;
+  esac
 }
 
 memory_mb() {
@@ -959,20 +1014,51 @@ EOF
   fi
 }
 
+restore_backup_dir() {
+  backup_dir="$1"
+  [ -n "$backup_dir" ] || return 1
+  if [ -f "$backup_dir/restore-current.conf" ]; then
+    cp "$backup_dir/restore-current.conf" "$SYSCTL_FILE"
+    sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+  elif [ -f "$backup_dir/$(basename "$SYSCTL_FILE")" ]; then
+    cp "$backup_dir/$(basename "$SYSCTL_FILE")" "$SYSCTL_FILE"
+    sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+  else
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null 2>&1 || true
+  fi
+  if [ -f "$backup_dir/$(basename "$BASELINE_FILE")" ]; then
+    cp "$backup_dir/$(basename "$BASELINE_FILE")" "$BASELINE_FILE"
+  elif [ -f "$BASELINE_FILE" ]; then
+    rm -f "$BASELINE_FILE"
+  fi
+}
+
 apply_profile() {
-  need_root
   profile="$(normalize_profile "$1")"
   if [ "${DRY_RUN:-0}" = "1" ]; then
-    info "[dry-run] 将应用预设：$profile"
-    profile_values "$profile"
+    print_header "预制参数写入 · Dry Run"
+    print_profile_summary "$profile"
+    ui_note "动作" "只展示将写入的参数，不修改系统。"
+    values="$(profile_values "$profile")"
+    # shellcheck disable=SC2086
+    set -- $values
+    ui_row "tcp_rmem" "$4 $5 $6"
+    ui_row "tcp_wmem" "$7 $8 $9"
+    ui_row "BBR/qdisc" "bbr / $(preferred_qdisc)"
     return 0
   fi
+  need_root
   backup_dir="$(backup_state)"
   ensure_tcp_baseline
   write_sysctl_config "$profile"
   if have_cmd sysctl; then
-    sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || die "sysctl 配置加载失败，备份目录：$backup_dir"
+    if ! sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 && ! sysctl --system >/dev/null 2>&1; then
+      restore_backup_dir "$backup_dir" >/dev/null 2>&1 || true
+      die "sysctl 配置加载失败，已尝试回滚；备份目录：$backup_dir"
+    fi
   else
+    restore_backup_dir "$backup_dir" >/dev/null 2>&1 || true
     die "当前系统缺少 sysctl。"
   fi
   echo "$profile" > "$STATE_DIR/last-profile"
@@ -1092,21 +1178,7 @@ rollback_last() {
   need_root
   latest="$(find "$STATE_DIR/backups" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)"
   [ -n "$latest" ] || die "未找到可回滚备份。"
-  if [ -f "$latest/restore-current.conf" ]; then
-    cp "$latest/restore-current.conf" "$SYSCTL_FILE"
-    sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
-  elif [ -f "$latest/99-tcp-tune.conf" ]; then
-    cp "$latest/99-tcp-tune.conf" "$SYSCTL_FILE"
-    sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
-  else
-    rm -f "$SYSCTL_FILE"
-    sysctl --system >/dev/null 2>&1 || true
-  fi
-  if [ -f "$latest/$(basename "$BASELINE_FILE")" ]; then
-    cp "$latest/$(basename "$BASELINE_FILE")" "$BASELINE_FILE"
-  elif [ -f "$BASELINE_FILE" ]; then
-    rm -f "$BASELINE_FILE"
-  fi
+  restore_backup_dir "$latest"
   mkdir -p "$STATE_DIR/rolled-back"
   rollback_target="$(unique_path "$STATE_DIR/rolled-back/$(basename "$latest")")"
   mv "$latest" "$rollback_target"
@@ -2047,25 +2119,28 @@ print_ai_comparison_table() {
 
 print_ai_decision_summary() {
   role="$1"
-  normalized="$2"
+  objective="$2"
+  normalized="$3"
   # normalize 只输出白名单 key='value'，值已做枚举/数值边界校验。
   eval "$normalized"
   ui_section "AI 建议摘要"
+  case "$objective" in
+    retrans) action="收紧发送队列，优先压低重传" ;;
+    throughput) action="在可控重传下放宽吞吐空间" ;;
+    startup) action="压低排队，优先改善首秒速度" ;;
+    *) action="按链路结果做保守调整" ;;
+  esac
+  metric_line "本轮动作" "$action" "warn"
   case "$role" in
     vps)
-      metric_line "调整位置" "VPS 对端" "info"
-      metric_line "拥塞控制" "${vps_congestion:-cubic}" "good"
-      metric_line "发送低水位" "${vps_notsent:-未提供}" "warn"
-      metric_line "输出限制" "${vps_limit:-未提供}" "warn"
+      metric_line "调整范围" "VPS 对端 TCP 参数" "info"
       ;;
     openwrt)
-      metric_line "调整位置" "本机 OpenWrt（最小修改）" "info"
-      metric_line "发送低水位" "${op_notsent:-未提供}" "warn"
-      metric_line "输出限制" "${op_limit:-未提供}" "warn"
-      metric_line "系统范围" "不改防火墙 / DNS / 代理" "good"
+      metric_line "调整范围" "本机 OpenWrt 最小 TCP 参数" "info"
       ;;
   esac
-  metric_line "AI 理由" "${ai_reason:-未提供}" "info"
+  metric_line "安全边界" "不执行任意命令，写入前备份，复测失败回滚" "good"
+  metric_line "简要理由" "${ai_reason:-未提供}" "info"
 }
 
 objective_clamp_ai_decision() {
@@ -2224,6 +2299,7 @@ ai_auto_mode() {
   ui_row "目标" "$objective"
   ui_row "轮数" "$rounds"
   ui_note "安全边界" "AI 不能执行任意命令，只能触发脚本内置白名单动作。"
+  post_client_stage "ai" "running" "$(objective_label "$objective")"
 
   if model="$(ai_select_model 2>/dev/null)"; then
     :
@@ -2235,6 +2311,7 @@ ai_auto_mode() {
 
   round=1
   previous_summary=""
+  ai_rolled_back="0"
   while [ "$round" -le "$rounds" ]; do
     echo
     ui_section "第 $round/$rounds 轮基线"
@@ -2254,7 +2331,7 @@ ai_auto_mode() {
       normalized_decision="$(printf '%s' "$decision" | ai_python_client normalize "$role")" || die "内置策略解析失败。"
     }
     normalized_decision="$(objective_clamp_ai_decision "$role" "$objective" "$normalized_decision")"
-    print_ai_decision_summary "$role" "$normalized_decision"
+    print_ai_decision_summary "$role" "$objective" "$normalized_decision"
     previous_summary="$summary"
     previous_backup="$LAST_MANUAL_BACKUP"
     apply_ai_decision "$role" "$normalized_decision"
@@ -2268,6 +2345,8 @@ ai_auto_mode() {
     if summary_regressed "$objective" "$previous_summary" "$after_summary"; then
       warn "复测指标退化超过阈值，正在回滚本轮 AI 调整。"
       restore_manual_backup "$current_backup"
+      post_client_stage "ai" "rollback" "$(objective_label "$objective")"
+      ai_rolled_back="1"
       break
     fi
     ui_note "目标判定" "$(summary_objective_note "$objective" "$previous_summary" "$after_summary")"
@@ -2278,6 +2357,7 @@ ai_auto_mode() {
   ui_section "完成"
   ui_row "最终角色" "$role"
   ui_row "模型" "$model"
+  [ "$ai_rolled_back" = "1" ] || post_client_stage "ai" "success" "$(objective_label "$objective")"
   ui_note "回滚" "如需撤销最近保留的手动适配，可使用备份目录中的 before 文件恢复。"
 }
 
@@ -2355,8 +2435,90 @@ openwrt_advice() {
   fi
   mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
   if [ "$mem_kb" -gt 0 ] && [ "$mem_kb" -lt 262144 ]; then
-    echo "  - 当前内存低于 256MiB，不建议直接使用“远距穿透”或“超远距极限”预设。"
+    echo "  - 当前内存低于 256MiB，不建议直接使用高缓冲预设。"
   fi
+}
+
+detect_rtt_ms() {
+  host="$1"
+  have_cmd ping || { echo 0; return 0; }
+  output="$(ping -c 3 -W 1 "$host" 2>/dev/null || true)"
+  avg="$(printf '%s\n' "$output" | awk -F'=' '/rtt|round-trip/ { split($2,a,"/"); printf "%d\n", a[2] + 0; found=1 } END { if (!found) print 0 }' | tail -n 1)"
+  is_unsigned_integer "$avg" || avg=0
+  echo "$avg"
+}
+
+recommend_preset_name() {
+  rtt_ms="${1:-0}"
+  memory_mb_value="${2:-1024}"
+  retransmits="${3:-0}"
+  download_bps="${4:-0}"
+  if [ "$rtt_ms" -lt 30 ]; then
+    index=1
+  elif [ "$rtt_ms" -lt 70 ]; then
+    index=2
+  elif [ "$rtt_ms" -lt 130 ]; then
+    index=3
+  elif [ "$rtt_ms" -lt 190 ]; then
+    index=4
+  else
+    index=5
+  fi
+  if [ "$memory_mb_value" -lt 256 ] && [ "$index" -gt 3 ]; then
+    index=3
+  fi
+  if [ "$retransmits" -gt 500 ] && [ "$index" -gt 1 ]; then
+    index=$((index - 1))
+  fi
+  if awk -v bps="$download_bps" 'BEGIN { exit !(bps > 0 && bps < 20000000) }' && [ "$index" -gt 3 ]; then
+    index=3
+  fi
+  preset_by_number "$index"
+}
+
+recommend_preset_reason() {
+  rtt_ms="${1:-0}"
+  memory_mb_value="${2:-1024}"
+  retransmits="${3:-0}"
+  download_bps="${4:-0}"
+  reason="RTT ${rtt_ms}ms / 内存 ${memory_mb_value}MiB / 重传 $(format_count "$retransmits") 次"
+  if [ "$memory_mb_value" -lt 256 ]; then
+    reason="$reason；低内存设备不推荐高挡位"
+  fi
+  if [ "$retransmits" -gt 500 ]; then
+    reason="$reason；重传偏高，已降低推荐挡位"
+  fi
+  if awk -v bps="$download_bps" 'BEGIN { exit !(bps > 0 && bps < 20000000) }'; then
+    reason="$reason；吞吐较低，可能是链路或限速问题"
+  fi
+  echo "$reason"
+}
+
+profile_probe_metrics() {
+  host="$1"
+  port="$2"
+  bind_ip="$3"
+  rtt_ms="$(detect_rtt_ms "$host")"
+  upload_json="$(run_iperf_client "$host" "$port" 0 8 "$bind_ip" 2>/dev/null || true)"
+  download_json="$(run_iperf_client "$host" "$port" 1 8 "$bind_ip" 2>/dev/null || true)"
+  upload_bps="$(printf '%s\n' "$upload_json" | extract_bps)"
+  upload_retr="$(printf '%s\n' "$upload_json" | extract_retransmits)"
+  upload_first="$(printf '%s\n' "$upload_json" | extract_first_interval_bps)"
+  download_bps="$(printf '%s\n' "$download_json" | extract_bps)"
+  download_retr="$(printf '%s\n' "$download_json" | extract_retransmits)"
+  download_first="$(printf '%s\n' "$download_json" | extract_first_interval_bps)"
+  upload_bps="${upload_bps:-0}"
+  upload_retr="${upload_retr:-0}"
+  upload_first="${upload_first:-0}"
+  download_bps="${download_bps:-0}"
+  download_retr="${download_retr:-0}"
+  download_first="${download_first:-0}"
+  total_retr=$((upload_retr + download_retr))
+  memory_mb_value="$(memory_mb)"
+  recommended="$(recommend_preset_name "$rtt_ms" "$memory_mb_value" "$total_retr" "$download_bps")"
+  cat <<EOF
+$rtt_ms $memory_mb_value $upload_bps $upload_retr $upload_first $download_bps $download_retr $download_first $total_retr $recommended
+EOF
 }
 
 public_ip() {
@@ -2746,6 +2908,7 @@ auto_tune() {
   clear_screen
   print_header "正在优化 · $mode_name"
   ui_subtitle "$transfer_name · 本机 $display_local_ip · 第 1/$rounds 轮"
+  post_client_stage "auto" "running" "$mode_name"
   echo
   ui_section "优化概览"
   ui_row "模式" "$mode_name"
@@ -2939,6 +3102,11 @@ auto_tune() {
       final_startup_bps="${first_startup_bps:-0}"
     fi
   fi
+  if [ "$rolled_back_regression" = "1" ]; then
+    post_client_stage "auto" "rollback" "$mode_name"
+  else
+    post_client_stage "auto" "success" "$mode_name"
+  fi
   clear_screen
   print_header "优化完成"
   ui_subtitle "$mode_name · $transfer_name · 共测试 $completed_rounds 轮"
@@ -3107,6 +3275,55 @@ def safe_choice(value, allowed, default):
     value = str(value or default)
     return value if value in allowed else default
 
+def format_rate(value):
+    try:
+        bps = float(value or 0)
+    except (TypeError, ValueError):
+        bps = 0
+    if bps >= 1_000_000_000:
+        return f"{bps / 1_000_000_000:.2f} Gbps"
+    return f"{bps / 1_000_000:.1f} Mbps"
+
+def event_text(event):
+    stamp = time.strftime("%H:%M:%S", time.localtime(event.get("time", 0)))
+    action = event.get("action")
+    if action == "peer-report" and event.get("stage"):
+        stage = event.get("stage")
+        result = event.get("result") or ""
+        detail = event.get("detail") or ""
+        names = {
+            "preset-probe": "预制参数检测",
+            "preset-apply": "预制参数写入",
+            "rollback": "回滚",
+            "auto": "稳定自动优化",
+            "ai": "AI 智能优化",
+        }
+        result_names = {
+            "running": "进行中",
+            "ok": "完成",
+            "success": "成功",
+            "rollback": "已回滚",
+            "failed": "失败",
+        }
+        label = names.get(stage, stage)
+        status = result_names.get(result, result)
+        suffix = f"：{detail}" if detail else ""
+        return f"{stamp} {label}{status and ' ' + status}{suffix}"
+    if action == "peer-report" and event.get("round") is not None:
+        direction = "上传" if event.get("direction") == "upload" else "下载"
+        retransmits = event.get("retransmits")
+        rate = format_rate(event.get("bits_per_second"))
+        first = event.get("first_second_bits_per_second")
+        first_text = f"，首秒 {format_rate(first)}" if first is not None else ""
+        return f"{stamp} 第 {event.get('round')} 轮{direction}：{rate}，重传 {retransmits or 0} 次{first_text}"
+    if action == "peer-report":
+        return f"{stamp} 客户端连接：{event.get('os') or event.get('role', 'unknown')} {event.get('lan_ip') or ''}".strip()
+    if action == "test":
+        return f"{stamp} 服务端测速任务完成"
+    if action == "stop-request":
+        return f"{stamp} 收到停止会话请求"
+    return f"{stamp} {action or '事件'}"
+
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "tcp-tune-agent/0.1"
 
@@ -3130,7 +3347,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             write_json(self, 200, {"ok": True, "iperf_port": IPERF_PORT, "state": STATE})
             return
         if path == "/events":
-            write_json(self, 200, {"ok": True, "events": STATE["events"][-100:], "peer_reports": STATE["peer_reports"][-20:]})
+            events = STATE["events"][-100:]
+            write_json(self, 200, {
+                "ok": True,
+                "events": events,
+                "summaries": [event_text(event) for event in events[-30:]],
+                "peer_reports": STATE["peer_reports"][-20:],
+            })
             return
         if path == "/status":
             result = run_cmd([SCRIPT, "status"])
@@ -3164,6 +3387,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "direction": payload.get("direction", ""),
                 "retransmits": payload.get("retransmits"),
                 "bits_per_second": payload.get("bits_per_second"),
+                "first_second_bits_per_second": payload.get("first_second_bits_per_second"),
+                "stage": payload.get("stage", ""),
+                "result": payload.get("result", ""),
+                "detail": payload.get("detail", ""),
             })
             write_json(self, 200, {"ok": True})
             return
@@ -3293,10 +3520,62 @@ post_json() {
   curl -fsS -H "X-TCP-Tune-Token: $token" -H "Content-Type: application/json" -d "$data" "$url"
 }
 
+post_client_stage() {
+  stage="$1"
+  result="$2"
+  detail="${3:-}"
+  [ -n "${TUNE_REPORT_PEER:-}" ] || return 0
+  [ -n "${TUNE_REPORT_TOKEN:-}" ] || return 0
+  now="$(date +%s)"
+  lan_ip="${TUNE_CLIENT_IP:-$(local_lan_ipv4 || true)}"
+  data="{\"role\":\"client-stage\",\"lan_ip\":\"$lan_ip\",\"stage\":\"$stage\",\"result\":\"$result\",\"detail\":\"$detail\",\"time\":$now}"
+  post_json "$TUNE_REPORT_PEER/report" "$TUNE_REPORT_TOKEN" "$data" >/dev/null 2>&1 || true
+}
+
 get_agent_json() {
   url="$1"
   token="$2"
   curl -fsS -H "X-TCP-Tune-Token: $token" "$url"
+}
+
+render_agent_events_summary() {
+  peer="$1"
+  token="$2"
+  json="$(get_agent_json "$peer/events" "$token")" || return 1
+  if have_cmd python3; then
+    tmp_events="$STATE_DIR/events-summary.json"
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    printf '%s' "$json" > "$tmp_events"
+    python3 - "$tmp_events" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+summaries = data.get("summaries") or []
+if not summaries:
+    print("  暂无过程记录。")
+else:
+    for line in summaries[-30:]:
+        print(f"  {line}")
+PY
+    return 0
+  fi
+  printf '%s\n' "$json" | awk '
+    /"summaries"[[:space:]]*:/ { in_summaries=1; next }
+    in_summaries && /\]/ { in_summaries=0; next }
+    in_summaries {
+      line=$0
+      sub(/^[[:space:]]*"/, "", line)
+      sub(/",?[[:space:]]*$/, "", line)
+      gsub(/\\"/, "\"", line)
+      if (line != "") print "  " line
+      found=1
+    }
+    END {
+      if (!found) print "  暂无过程记录。"
+    }
+  '
 }
 
 render_server_dashboard() {
@@ -3344,12 +3623,15 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
 reports = state.get("peer_reports", [])
 devices = {}
 results = []
+stages = []
 for entry in reports:
     payload = entry.get("payload", {})
     ip = str(payload.get("lan_ip") or "").strip()
     role = str(payload.get("role") or "unknown")
     if payload.get("bits_per_second") is not None:
         results.append((entry.get("time", 0), payload))
+    if payload.get("stage"):
+        stages.append((entry.get("time", 0), payload))
     if ip:
         device = devices.setdefault(ip, {"ip": ip, "os": "Unknown", "role": role, "last": 0})
         if payload.get("os"):
@@ -3367,6 +3649,31 @@ else:
         print(f"  ● {device['os']} · {device['ip']}  最近上报 {seen}")
 
 print()
+print("  ▎ 客户端状态")
+if not stages:
+    print("  当前状态  空闲 / 未开始")
+    print("  最近结论  未开始")
+else:
+    _, payload = stages[-1]
+    stage_name = {
+        "preset-probe": "预制参数检测",
+        "preset-apply": "预制参数写入",
+        "rollback": "回滚",
+        "auto": "稳定自动优化",
+        "ai": "AI 智能优化",
+    }.get(str(payload.get("stage") or ""), str(payload.get("stage") or "任务"))
+    result_name = {
+        "running": "进行中",
+        "ok": "完成",
+        "success": "成功",
+        "rollback": "已回滚",
+        "failed": "失败",
+    }.get(str(payload.get("result") or ""), str(payload.get("result") or ""))
+    detail = str(payload.get("detail") or "")
+    print(f"  当前状态  {stage_name} {result_name}".rstrip())
+    print(f"  最近结论  {detail or result_name or '未开始'}")
+
+print()
 print("  ▎ 最近结果")
 if not results:
     print("  尚未收到测速结果。")
@@ -3377,6 +3684,8 @@ else:
     bps = float(payload.get("bits_per_second") or 0)
     rate = f"{bps / 1_000_000_000:.2f} Gbps" if bps >= 1_000_000_000 else f"{bps / 1_000_000:.1f} Mbps"
     retransmits = int(float(payload.get("retransmits") or 0))
+    first_bps = float(payload.get("first_second_bits_per_second") or 0)
+    first_rate = f"{first_bps / 1_000_000_000:.2f} Gbps" if first_bps >= 1_000_000_000 else f"{first_bps / 1_000_000:.1f} Mbps"
     round_no = payload.get("round") or "-"
     rounds = payload.get("rounds") or "-"
     print(f"  模式  {objective}")
@@ -3384,6 +3693,9 @@ else:
     print(f"  轮次  {round_no}/{rounds}")
     print(f"  速度  {rate}")
     print(f"  重传  {retransmits:,} 次")
+    if first_bps > 0:
+        print(f"  首秒  {first_rate}")
+    print("  判定  已收到结果，等待客户端复测或下一步操作")
 
 print()
 print("  ▎ 最近事件")
@@ -3393,7 +3705,11 @@ if not events:
 else:
     for event in events:
         stamp = time.strftime("%H:%M:%S", time.localtime(event.get("time", 0)))
-        if event.get("action") == "peer-report" and event.get("round") is not None:
+        if event.get("action") == "peer-report" and event.get("stage"):
+            stage = {"preset-probe": "预制参数检测", "preset-apply": "预制参数写入", "rollback": "回滚"}.get(event.get("stage"), event.get("stage"))
+            status = {"running": "进行中", "ok": "完成", "success": "成功", "rollback": "已回滚", "failed": "失败"}.get(event.get("result"), event.get("result"))
+            text = f"{stage} {status}".strip()
+        elif event.get("action") == "peer-report" and event.get("round") is not None:
             text = f"收到第 {event.get('round')} 轮测速结果"
         elif event.get("action") == "peer-report":
             text = f"客户端上报：{event.get('lan_ip') or event.get('role', 'unknown')}"
@@ -3470,15 +3786,34 @@ print_client_commands() {
       ;;
   esac
   ui_section "客户端连接命令"
+  ui_note "令牌" "交互终端显示完整 token；非交互输出会隐藏 token。"
   printf "%sOpenWrt / Linux / macOS%s\n" "$COLOR_CYAN" "$COLOR_RESET"
-  echo "  curl -fsSL $RAW_BASE_URL/tcp-tune.sh | sh -s -- --yes client --peer $peer_url --token $display_token --iperf-port $IPERF_PORT"
+  cat <<EOF
+  curl -fsSL $RAW_BASE_URL/tcp-tune.sh | \\
+    sh -s -- --yes client \\
+      --peer $peer_url \\
+      --token $display_token \\
+      --iperf-port $IPERF_PORT
+EOF
   echo
-  printf "%s已有脚本本地运行%s\n" "$COLOR_CYAN" "$COLOR_RESET"
-  echo "  sh tcp-tune.sh --yes client --peer $peer_url --token $display_token --iperf-port $IPERF_PORT"
+  printf "%s短命令模式%s\n" "$COLOR_CYAN" "$COLOR_RESET"
+  cat <<EOF
+  curl -fsSL $RAW_BASE_URL/tcp-tune.sh -o tcp-tune.sh
+  sh tcp-tune.sh --yes client \\
+    --peer $peer_url \\
+    --token $display_token \\
+    --iperf-port $IPERF_PORT
+EOF
   echo
   printf "%sWindows PowerShell%s\n" "$COLOR_CYAN" "$COLOR_RESET"
-  echo "  iwr -UseBasicParsing $RAW_BASE_URL/tcp-tune.ps1 -OutFile tcp-tune.ps1"
-  printf '  .\\tcp-tune.ps1 client -Peer %s -Token %s -IperfPort %s -Direction download -Yes\n' "$peer_url" "$display_token" "$IPERF_PORT"
+  cat <<EOF
+  iwr -UseBasicParsing $RAW_BASE_URL/tcp-tune.ps1 -OutFile tcp-tune.ps1
+  .\\tcp-tune.ps1 client \`
+    -Peer $peer_url \`
+    -Token $display_token \`
+    -IperfPort $IPERF_PORT \`
+    -Direction download -Yes
+EOF
 }
 
 join_mode() {
@@ -3557,6 +3892,113 @@ join_mode() {
   else
     echo "准备启动$(objective_label "$objective")优化。"
     auto_tune "$host" "$iperf_port" "$objective" "$target_retr" "$rounds" "$reverse" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive" "$allow_same_public"
+  fi
+}
+
+preset_write_menu() {
+  host="$1"
+  iperf_port="$2"
+  allow_same_public="$3"
+  clear_screen
+  print_header "预制参数写入"
+  ui_subtitle "先检测本机和对端链路，再推荐一个可快速套用的 TCP 参数挡位。"
+  echo
+  need_root
+  install_runtime_deps
+  ensure_tcp_baseline
+  bind_ip="$(local_lan_ipv4 || true)"
+  case "$host" in
+    127.*|localhost|"$bind_ip") bind_ip="" ;;
+  esac
+  display_local_ip="${bind_ip:-$(local_lan_ipv4 || true)}"
+  [ -n "$display_local_ip" ] || display_local_ip="未识别"
+  post_client_stage "preset-probe" "running" "正在检测链路"
+  ui_section "检测中"
+  ui_note "动作" "正在检测 RTT、iperf3 上传/下载、重传和本机 TCP 基线..."
+  metrics="$(profile_probe_metrics "$host" "$iperf_port" "$bind_ip")"
+  # shellcheck disable=SC2086
+  set -- $metrics
+  rtt_ms="$1"
+  memory_mb_value="$2"
+  upload_bps="$3"
+  upload_retr="$4"
+  upload_first="$5"
+  download_bps="$6"
+  download_retr="$7"
+  download_first="$8"
+  total_retr="$9"
+  recommended="${10:-近距轻载}"
+  reason="$(recommend_preset_reason "$rtt_ms" "$memory_mb_value" "$total_retr" "$download_bps")"
+  post_client_stage "preset-probe" "ok" "$recommended"
+
+  clear_screen
+  print_header "预制参数写入"
+  ui_section "检测结果"
+  ui_row "本机地址" "$display_local_ip"
+  ui_row "系统" "${OS_NAME:-Unknown}"
+  ui_row "内存" "${memory_mb_value}MiB"
+  ui_row "RTT" "${rtt_ms}ms"
+  ui_row "上传" "$(format_rate "$upload_bps") / 重传 $(format_count "$upload_retr") 次 / 首秒 $(format_rate "$upload_first")"
+  ui_row "下载" "$(format_rate "$download_bps") / 重传 $(format_count "$download_retr") 次 / 首秒 $(format_rate "$download_first")"
+  current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 未识别)"
+  current_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo 未识别)"
+  ui_row "当前基线" "$current_cc / $current_qdisc"
+  echo
+  ui_section "推荐挡位"
+  print_profile_summary "$recommended"
+  ui_note "判断依据" "$reason"
+  echo
+  ui_section "可选挡位"
+  ui_mode_card "1" "近距轻载" "RTT < 30ms" "低延迟链路，优先控制重传"
+  ui_mode_card "2" "近距高速" "RTT 30~70ms" "短中距高下行，缓冲对称"
+  ui_mode_card "3" "中距均衡" "RTT 70~130ms" "跨境中等延迟，接收略大"
+  ui_mode_card "4" "长距增强" "RTT 130~190ms" "跨海高带宽，较大 BDP"
+  ui_mode_card "5" "远距大带宽" "RTT > 190ms" "高延迟大带宽，低内存谨慎"
+  ui_back_item
+  echo
+  if ! prompt_read "请选择要写入的挡位 [1-5/0]，直接回车使用推荐："; then return 1; fi
+  choice="$PROMPT_REPLY"
+  [ -n "$choice" ] || choice="$recommended"
+  if is_back_choice "$choice"; then
+    return_to_menu
+    return 0
+  fi
+  if profile_exists "$choice"; then
+    selected="$(normalize_profile "$choice")"
+  else
+    selected="$(preset_by_number "$choice" 2>/dev/null || true)"
+    [ -n "$selected" ] || { warn "无效挡位。"; pause_for_enter; return 0; }
+  fi
+  if [ "$memory_mb_value" -lt 256 ]; then
+    case "$selected" in
+      "长距增强"|"远距大带宽")
+        warn "当前内存低于 256MiB，不建议写入高挡位；已返回选择页。"
+        pause_for_enter
+        return 0
+        ;;
+    esac
+  fi
+  clear_screen
+  print_header "确认写入"
+  print_profile_summary "$selected"
+  ui_note "安全" "写入前会创建备份，失败会自动回滚。"
+  ui_note "范围" "只修改本机 TCP/sysctl 参数，不改防火墙、DNS、代理或网络服务。"
+  echo
+  if ! prompt_read "按回车确认写入，输入 0 返回主菜单："; then return 1; fi
+  if is_back_choice "$PROMPT_REPLY"; then
+    return_to_menu
+    return 0
+  fi
+  post_client_stage "preset-apply" "running" "$selected"
+  if apply_profile "$selected"; then
+    post_client_stage "preset-apply" "success" "$selected"
+    echo
+    ui_section "写入完成"
+    ui_row "已写入" "$selected"
+    ui_note "下一步" "如效果不理想，可在客户端菜单选择回滚最近修改。"
+  else
+    post_client_stage "preset-apply" "rollback" "$selected"
+    return 1
   fi
 }
 
@@ -3674,17 +4116,19 @@ client_menu() {
     echo
     ui_section "操作菜单"
     ui_menu_group "优化"
-    ui_menu_item "1" "开始优化" "确定性调参：重传 / 吞吐 / 快速起速" "$COLOR_GREEN"
-    ui_menu_item "2" "AI 智能调参" "AI 辅助：快速起速 / 吞吐 / 重传" "$COLOR_CYAN"
+    ui_menu_item "0" "预制参数写入" "先检测双端基础信息，再推荐五档参数" "$COLOR_YELLOW"
+    ui_menu_item "1" "稳定自动优化" "不用 AI，规则固定，自动测速迭代" "$COLOR_GREEN"
+    ui_menu_item "2" "AI 智能优化" "AI 给建议，脚本按白名单执行" "$COLOR_CYAN"
     echo
     ui_menu_group "状态"
     ui_menu_item "3" "查看本机状态" "系统 / TCP 参数"
     ui_menu_item "4" "查看服务端状态" "会话 / 测速服务"
-    ui_menu_item "5" "查看过程记录" "任务 / 结果"
+    ui_menu_item "5" "查看过程记录" "中文摘要日志"
     echo
     ui_menu_group "退出"
-    ui_menu_item "6" "停止会话并退出" "清理 Agent / iperf3" "$COLOR_YELLOW"
-    ui_menu_item "0" "退出客户端" "不停止服务端会话" "$COLOR_DIM"
+    ui_menu_item "6" "回滚最近修改" "恢复最近一次参数写入" "$COLOR_YELLOW"
+    ui_menu_item "7" "停止会话并退出" "清理 Agent / iperf3" "$COLOR_YELLOW"
+    ui_menu_item "q" "退出客户端" "不停止服务端会话" "$COLOR_DIM"
     echo
     if ! prompt_read "${COLOR_BOLD}请选择：${COLOR_RESET}"; then
       warn "当前环境没有可用交互输入，客户端已保持连接上报后退出菜单。"
@@ -3692,13 +4136,25 @@ client_menu() {
     fi
     ans="$PROMPT_REPLY"
     case "$ans" in
+      0) MENU_RETURNED="0"; preset_write_menu "$host" "$iperf_port" "$allow_same_public"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
       1) MENU_RETURNED="0"; run_client_optimization "$host" "$iperf_port" "$allow_same_public"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
       2) MENU_RETURNED="0"; run_client_ai_optimization "$host" "$iperf_port"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
       3) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
       4) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
-      5) clear_screen; print_header "过程记录"; get_agent_json "$peer/events" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
-      6) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
-      0) exit 0 ;;
+      5) clear_screen; print_header "过程记录"; render_agent_events_summary "$peer" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
+      6)
+        clear_screen
+        print_header "回滚最近修改"
+        if ( rollback_last ); then
+          post_client_stage "rollback" "success" "已回滚最近修改"
+        else
+          warn "回滚失败或没有可用备份。"
+          post_client_stage "rollback" "failed" "没有可用备份"
+        fi
+        pause_for_enter
+        ;;
+      7) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
+      q|Q) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac
   done
@@ -3735,7 +4191,7 @@ menu() {
     ui_menu_item "3" "自动优化" "选择目标，自动测速迭代调参"
     ui_menu_item "4" "查看状态" "双方 / 本机 TCP 参数"
     ui_menu_item "5" "智能推荐参数" "根据带宽、RTT、内存生成建议"
-    ui_menu_item "6" "选择固定预设" "从预设配置列表中选择"
+    ui_menu_item "6" "预制参数写入" "从五档预制参数中选择"
     echo
     ui_menu_group "管理"
     ui_menu_item "7" "回滚最近修改" "恢复优化前的系统参数" "$COLOR_YELLOW"
@@ -3805,7 +4261,7 @@ menu() {
         ;;
       6)
         clear_screen
-        print_header "TCP 预设"
+        print_header "预制参数写入"
         list_profiles
         echo
         ui_back_item
@@ -3838,7 +4294,7 @@ $APP_NAME $APP_VERSION
   sh tcp-tune.sh join --peer http://IP:PORT --token TOKEN [--direction download|upload] [--objective retrans|throughput|startup]
   sh tcp-tune.sh recommend --local-mbps 1000 --peer-mbps 1000 --rtt-ms 100 --memory-mb 1024
   sh tcp-tune.sh apply-smart --local-mbps 1000 --peer-mbps 1000 --rtt-ms 100 --memory-mb 1024
-  sh tcp-tune.sh apply-profile 近距极速
+  sh tcp-tune.sh apply-profile 中距均衡
   sh tcp-tune.sh apply-buffers RMEM_MAX WMEM_MAX
   sh tcp-tune.sh auto --host IP --direction download --objective retrans --target-retr 0 --rtt-ms 100
   sh tcp-tune.sh AI测速
@@ -3883,7 +4339,18 @@ main() {
     install) install_only ;;
     status) status_full ;;
     profiles|list-profiles) list_profiles ;;
-    apply-profile) [ "$#" -eq 1 ] || die "apply-profile 需要一个预设名。"; apply_profile "$1" ;;
+    apply-profile)
+      [ "$#" -ge 1 ] || die "apply-profile 需要一个预设名。"
+      profile_arg="$1"
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --dry-run) DRY_RUN=1; export DRY_RUN; shift ;;
+          *) die "未知 apply-profile 参数：$1" ;;
+        esac
+      done
+      apply_profile "$profile_arg"
+      ;;
     apply-buffers) [ "$#" -ge 2 ] || die "apply-buffers 需要 RMEM_MAX 和 WMEM_MAX。"; apply_buffers "$@" ;;
     recommend|apply-smart)
       local_mbps=""
