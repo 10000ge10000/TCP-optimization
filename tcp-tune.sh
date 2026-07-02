@@ -3600,6 +3600,7 @@ render_server_dashboard() {
   echo
   ui_section "安全说明"
   ui_note "只读" "服务端不修改 TCP 参数，所有优化由客户端在本机执行。"
+  ui_note "刷新" "连接命令不会反复重绘；底部状态行会原地刷新，方便复制。"
   ui_note "清理" "保持此窗口运行；按 Ctrl+C 会停止 Agent/iperf3 并清理凭据。"
 }
 
@@ -3723,6 +3724,78 @@ else:
 PY
 }
 
+server_compact_status_line() {
+  token="$1"
+  remaining="${2:-0}"
+  ttl_text="$((remaining / 60))m $((remaining % 60))s"
+  dashboard_file="$STATE_DIR/server-compact-$AGENT_PORT.json"
+  if ! curl -fsS -H "X-TCP-Tune-Token: $token" "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
+    printf "刷新 %s | 剩余 %s | Agent 状态暂不可读" "$(date '+%H:%M:%S')" "$ttl_text"
+    return 0
+  fi
+  python3 - "$dashboard_file" "$ttl_text" <<'PY'
+import json
+import sys
+import time
+
+path, ttl_text = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        state = json.load(handle).get("state", {})
+except Exception:
+    state = {}
+
+reports = state.get("peer_reports", [])
+devices = {}
+latest_result = None
+latest_stage = None
+for entry in reports:
+    payload = entry.get("payload", {})
+    stamp = entry.get("time", 0)
+    ip = str(payload.get("lan_ip") or "").strip()
+    if ip:
+        devices[ip] = max(devices.get(ip, 0), stamp)
+    if payload.get("bits_per_second") is not None:
+        latest_result = payload
+    if payload.get("stage"):
+        latest_stage = payload
+
+status = "空闲"
+conclusion = "未开始"
+if latest_stage:
+    stage_map = {
+        "preset-probe": "预制检测",
+        "preset-apply": "预制写入",
+        "rollback": "回滚中",
+        "auto": "稳定优化",
+        "ai": "AI 优化",
+    }
+    result_map = {
+        "running": "进行中",
+        "ok": "完成",
+        "success": "成功",
+        "rollback": "已回滚",
+        "failed": "失败",
+    }
+    status = stage_map.get(str(latest_stage.get("stage") or ""), str(latest_stage.get("stage") or "任务"))
+    conclusion = result_map.get(str(latest_stage.get("result") or ""), str(latest_stage.get("result") or "进行中"))
+
+result_text = "暂无测速"
+if latest_result:
+    bps = float(latest_result.get("bits_per_second") or 0)
+    rate = f"{bps / 1_000_000_000:.2f}Gbps" if bps >= 1_000_000_000 else f"{bps / 1_000_000:.1f}Mbps"
+    retransmits = int(float(latest_result.get("retransmits") or 0))
+    direction = "上传" if latest_result.get("direction") == "upload" else "下载"
+    result_text = f"{direction} {rate} / 重传 {retransmits:,} 次"
+
+print(
+    f"刷新 {time.strftime('%H:%M:%S')} | 剩余 {ttl_text} | "
+    f"客户端 {len(devices)} | 状态 {status} | 最近 {result_text} | 判定 {conclusion}",
+    end="",
+)
+PY
+}
+
 server_monitor() {
   token_file="$STATE_DIR/agent-$AGENT_PORT.token"
   url_file="$STATE_DIR/agent-$AGENT_PORT.url"
@@ -3734,21 +3807,31 @@ server_monitor() {
   rendered_once=0
   while true; do
     if [ ! -f "$agent_pid_file" ]; then
+      [ -t 1 ] && [ "$rendered_once" = "1" ] && echo
       info "服务端会话已停止。"
       return 0
     fi
     agent_pid="$(cat "$agent_pid_file" 2>/dev/null || true)"
     if [ -z "$agent_pid" ] || ! kill -0 "$agent_pid" >/dev/null 2>&1; then
+      [ -t 1 ] && [ "$rendered_once" = "1" ] && echo
       warn "Agent 已退出，服务端监控结束。"
       return 0
     fi
     now="$(date +%s)"
     remaining=$((deadline - now))
     if [ "$remaining" -le 0 ]; then
+      [ -t 1 ] && [ "$rendered_once" = "1" ] && echo
       warn "会话已达到 TTL，正在安全停止。"
       return 0
     fi
-    if [ -t 1 ] || [ "$rendered_once" = "0" ]; then
+    if [ -t 1 ]; then
+      if [ "$rendered_once" = "0" ]; then
+        render_server_dashboard "$peer_url" "$token" "$remaining"
+        echo
+        rendered_once=1
+      fi
+      printf "\r\033[K%s" "$(server_compact_status_line "$token" "$remaining")"
+    elif [ "$rendered_once" = "0" ]; then
       render_server_dashboard "$peer_url" "$token" "$remaining"
       rendered_once=1
     fi
