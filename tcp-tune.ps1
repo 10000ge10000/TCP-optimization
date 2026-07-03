@@ -401,6 +401,9 @@ function Run-Iperf {
 
   $raw = & iperf3 @arguments
   if ($LASTEXITCODE -ne 0) { throw "iperf3 测试失败。" }
+  return ($raw | Out-String | ConvertFrom-Json)
+}
+
 function Invoke-Iperf3Speedtest {
   param([string]$HostName, [int]$Port)
 
@@ -428,9 +431,6 @@ function Invoke-Iperf3Speedtest {
     Write-Host ""
     Write-Host "测速失败，请检查对端 iperf3 服务是否运行。" -ForegroundColor Yellow
   }
-}
-
-  return ($raw | Out-String | ConvertFrom-Json)
 }
 
 function Get-IperfMetrics {
