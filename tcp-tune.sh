@@ -2702,6 +2702,34 @@ run_iperf_client() {
   fi
 }
 
+run_iperf3_speedtest() {
+  host="$1"
+  port="$2"
+  clear_screen
+  print_header "iperf3 速度测试"
+  ui_subtitle "简单测速，不修改任何参数"
+  echo
+  ui_section "测试参数"
+  ui_row "对端地址" "$host"
+  ui_row "端口" "$port"
+  ui_row "测试方向" "下载（服务端 → 本机）"
+  ui_row "测试时长" "10秒"
+  case "$host" in
+    *:*) ui_note "IPv6" "检测到 IPv6 地址，使用 IPv6 测速" ;;
+  esac
+  echo
+  ui_note "状态" "正在测速..."
+  ensure_dependency iperf3 iperf3 || { warn "缺少 iperf3"; return 1; }
+  echo
+  if iperf3 -c "$host" -p "$port" -R -t 10; then
+    echo
+    ui_section "测速完成"
+  else
+    echo
+    warn "测速失败，请检查对端 iperf3 服务是否运行。"
+  fi
+}
+
 json_number() {
   key="$1"
   awk -v key="\"$key\"" '
@@ -4208,6 +4236,9 @@ client_menu() {
     ui_menu_item "4" "查看服务端状态" "会话 / 测速服务"
     ui_menu_item "5" "查看过程记录" "中文摘要日志"
     echo
+    ui_menu_group "测速"
+    ui_menu_item "8" "iperf3 速度测试" "简单测速，不修改参数" "$COLOR_CYAN"
+    echo
     ui_menu_group "退出"
     ui_menu_item "6" "回滚最近修改" "恢复最近一次参数写入" "$COLOR_YELLOW"
     ui_menu_item "7" "停止会话并退出" "清理 Agent / iperf3" "$COLOR_YELLOW"
@@ -4237,6 +4268,7 @@ client_menu() {
         pause_for_enter
         ;;
       7) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
+      8) run_iperf3_speedtest "$host" "$iperf_port"; pause_for_enter ;;
       q|Q) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac

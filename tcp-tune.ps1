@@ -401,6 +401,35 @@ function Run-Iperf {
 
   $raw = & iperf3 @arguments
   if ($LASTEXITCODE -ne 0) { throw "iperf3 测试失败。" }
+function Invoke-Iperf3Speedtest {
+  param([string]$HostName, [int]$Port)
+
+  Write-Header "iperf3 速度测试"
+  Write-Subtitle "简单测速，不修改任何参数"
+  Write-Host ""
+  Write-Section "测试参数"
+  Write-PanelRow "对端地址" $HostName
+  Write-PanelRow "端口" $Port
+  Write-PanelRow "测试方向" "下载（服务端 → 本机）"
+  Write-PanelRow "测试时长" "10秒"
+  if (Test-IPv6Literal -HostName $HostName) {
+    Write-Note "IPv6" "检测到 IPv6 地址，使用 IPv6 测速"
+  }
+  Write-Host ""
+  Write-Note "状态" "正在测速..."
+  Ensure-Command -Name "iperf3"
+  Write-Host ""
+  $arguments = @("-c", $HostName, "-p", "$Port", "-R", "-t", "10")
+  & iperf3 @arguments
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host ""
+    Write-Section "测速完成"
+  } else {
+    Write-Host ""
+    Write-Host "测速失败，请检查对端 iperf3 服务是否运行。" -ForegroundColor Yellow
+  }
+}
+
   return ($raw | Out-String | ConvertFrom-Json)
 }
 
@@ -815,6 +844,9 @@ function Invoke-ClientMenu {
     Write-MenuItem "4" "查看服务端状态" "会话 / 测速服务"
     Write-MenuItem "5" "查看过程记录" "中文摘要日志"
     Write-Host ""
+    Write-MenuGroup "测速"
+    Write-MenuItem "8" "iperf3 速度测试" "简单测速，不修改参数" "Cyan"
+    Write-Host ""
     Write-MenuGroup "退出"
     Write-MenuItem "6" "回滚最近修改" "Windows 端不自动写入，仅提示说明" "Yellow"
     Write-MenuItem "7" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
@@ -829,6 +861,7 @@ function Invoke-ClientMenu {
       "5" { Show-AgentEventSummary -PeerUrl $PeerUrl -TokenValue $TokenValue; Read-Host "按回车返回主菜单" | Out-Null }
       "6" { Write-Host "Windows 端默认没有自动写入 TCP 参数，无需回滚。" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
       "7" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
+      "8" { Invoke-Iperf3Speedtest -HostName $HostName -Port $Port; Read-Host "按回车返回主菜单" | Out-Null }
       "q" { return }
       "Q" { return }
       default { Write-Host "无效选择。" -ForegroundColor Yellow }
