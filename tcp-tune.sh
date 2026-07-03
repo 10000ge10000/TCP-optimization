@@ -1148,7 +1148,10 @@ EOF
   if sysctl -n net.ipv4.tcp_autocorking >/dev/null 2>&1; then
     echo "net.ipv4.tcp_autocorking = 1" >> "$SYSCTL_FILE"
   fi
-  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || die "sysctl 配置加载失败，备份目录：$backup_dir"
+  if ! sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 && ! sysctl --system >/dev/null 2>&1; then
+    restore_backup_dir "$backup_dir" >/dev/null 2>&1 || true
+    die "sysctl 配置加载失败，已尝试回滚；备份目录：$backup_dir"
+  fi
   if [ "${TUNE_SIMPLE_OUTPUT:-0}" = "1" ]; then
     info "参数已调整并即时保存（已创建回滚备份）。"
   else
@@ -1183,13 +1186,28 @@ apply_smart() {
 
 rollback_last() {
   need_root
-  latest="$(find "$STATE_DIR/backups" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)"
+  latest="$(latest_rollback_backup)"
   [ -n "$latest" ] || die "未找到可回滚备份。"
-  restore_backup_dir "$latest"
+  case "$(basename "$latest")" in
+    manual-*) restore_manual_backup "$latest" || return 1 ;;
+    *) restore_backup_dir "$latest" || return 1 ;;
+  esac
   mkdir -p "$STATE_DIR/rolled-back"
   rollback_target="$(unique_path "$STATE_DIR/rolled-back/$(basename "$latest")")"
   mv "$latest" "$rollback_target"
   info "已回滚到最近备份：$latest"
+}
+
+latest_rollback_backup() {
+  {
+    find "$STATE_DIR/backups" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true
+    find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -name 'manual-*' 2>/dev/null || true
+  } | while IFS= read -r dir; do
+    [ -d "$dir" ] || continue
+    key="$(basename "$dir" | sed -n 's/.*\([0-9]\{8\}-[0-9]\{6\}\).*/\1/p' | tail -n 1)"
+    [ -n "$key" ] || key="$(stat -c %Y "$dir" 2>/dev/null || stat -f %m "$dir" 2>/dev/null || echo 0)"
+    printf '%s\t%s\n' "$key" "$dir"
+  done | sort | tail -n 1 | cut -f2-
 }
 
 manual_backup_begin() {
@@ -1198,6 +1216,41 @@ manual_backup_begin() {
   ts="$(date +%Y%m%d-%H%M%S)"
   dir="$(unique_path "$STATE_DIR/manual-$label-$ts")"
   mkdir -p "$dir"
+  : > "$dir/restore-current.conf"
+  for key in \
+    fs.file-max \
+    net.ipv4.tcp_no_metrics_save \
+    net.ipv4.tcp_ecn \
+    net.ipv4.tcp_frto \
+    net.ipv4.tcp_mtu_probing \
+    net.ipv4.tcp_rfc1337 \
+    net.ipv4.tcp_sack \
+    net.ipv4.tcp_fack \
+    net.ipv4.tcp_window_scaling \
+    net.ipv4.tcp_adv_win_scale \
+    net.ipv4.tcp_moderate_rcvbuf \
+    net.ipv4.tcp_slow_start_after_idle \
+    net.ipv4.tcp_fastopen \
+    net.ipv4.tcp_notsent_lowat \
+    net.ipv4.tcp_limit_output_bytes \
+    net.ipv4.tcp_autocorking \
+    net.core.rmem_max \
+    net.core.wmem_max \
+    net.core.netdev_max_backlog \
+    net.core.somaxconn \
+    net.core.optmem_max \
+    net.ipv4.tcp_rmem \
+    net.ipv4.tcp_wmem \
+    net.ipv4.tcp_max_syn_backlog \
+    net.ipv4.udp_rmem_min \
+    net.ipv4.udp_wmem_min \
+    net.core.default_qdisc \
+    net.ipv4.tcp_congestion_control
+  do
+    value="$(sysctl -n "$key" 2>/dev/null || true)"
+    [ -n "$value" ] || continue
+    echo "$key = $value" >> "$dir/restore-current.conf"
+  done
   sysctl -a 2>/dev/null | grep -E '^(fs.file-max|net\.core\.|net\.ipv4\.tcp_|net\.ipv4\.udp_)' > "$dir/before-sysctl.txt" || true
   [ -f /etc/sysctl.conf ] && cp /etc/sysctl.conf "$dir/sysctl.conf.before" || true
   [ -f "$VPS_ADAPT_FILE" ] && cp "$VPS_ADAPT_FILE" "$dir/$(basename "$VPS_ADAPT_FILE").before" || true
@@ -1222,6 +1275,11 @@ restore_manual_backup() {
   elif [ -f "$OPENWRT_MINIMAL_FILE" ]; then
     rm -f "$OPENWRT_MINIMAL_FILE"
   fi
+  if [ -f "$backup_dir/$(basename "$SYSCTL_FILE").before" ]; then
+    cp "$backup_dir/$(basename "$SYSCTL_FILE").before" "$SYSCTL_FILE"
+  elif [ -f "$SYSCTL_FILE" ]; then
+    rm -f "$SYSCTL_FILE"
+  fi
   if [ -f "$backup_dir/$(basename "$BASELINE_FILE").before" ]; then
     cp "$backup_dir/$(basename "$BASELINE_FILE").before" "$BASELINE_FILE"
   elif [ -f "$BASELINE_FILE" ]; then
@@ -1230,9 +1288,12 @@ restore_manual_backup() {
   if [ -f "$backup_dir/sysctl.conf.before" ]; then
     cp "$backup_dir/sysctl.conf.before" /etc/sysctl.conf
   fi
-  for file in "$VPS_ADAPT_FILE" "$OPENWRT_MINIMAL_FILE" "$BASELINE_FILE" /etc/sysctl.conf; do
+  for file in "$VPS_ADAPT_FILE" "$OPENWRT_MINIMAL_FILE" "$SYSCTL_FILE" "$BASELINE_FILE" /etc/sysctl.conf; do
     [ -f "$file" ] && sysctl -e -p "$file" >/dev/null 2>&1 || true
   done
+  if [ -f "$backup_dir/restore-current.conf" ]; then
+    sysctl -e -p "$backup_dir/restore-current.conf" >/dev/null 2>&1 || true
+  fi
   info "已按手动备份回滚：$backup_dir"
 }
 
@@ -1251,6 +1312,18 @@ validate_positive_int_range() {
     ''|*[!0-9]*) return 1 ;;
   esac
   awk -v value="$value" -v min="$min" -v max="$max" 'BEGIN { exit !(value + 0 >= min + 0 && value + 0 <= max + 0) }'
+}
+
+require_option_value() {
+  opt="$1"
+  value="${2:-}"
+  case "$value" in
+    ''|--*) die "$opt 需要参数值" ;;
+  esac
+}
+
+validate_port_value() {
+  validate_positive_int_range "$1" 1 65535
 }
 
 ai_max_notsent() {
@@ -1297,7 +1370,10 @@ net.ipv4.tcp_wmem = 4096 16384 $wmem_max
 net.ipv4.tcp_notsent_lowat = $notsent_lowat
 net.ipv4.tcp_limit_output_bytes = $limit_output
 EOF
-  sysctl -e -p "$VPS_ADAPT_FILE" >/dev/null || die "VPS 适配参数加载失败，备份目录：$backup_dir"
+  if ! sysctl -e -p "$VPS_ADAPT_FILE" >/dev/null; then
+    restore_manual_backup "$backup_dir" >/dev/null 2>&1 || true
+    die "VPS 适配参数加载失败，已尝试回滚；备份目录：$backup_dir"
+  fi
   LAST_MANUAL_BACKUP="$backup_dir"
   info "VPS 适配参数已保存并加载：$VPS_ADAPT_FILE"
   info "备份目录：$backup_dir"
@@ -1325,22 +1401,21 @@ apply_openwrt_minimal_values() {
   cat > "$OPENWRT_MINIMAL_FILE" <<EOF
 # TCP-optimization: minimal local overrides for verified IPv6 peer paths.
 # This file does not touch firewall, WAN, DNS, DHCP or proxy services.
+net.ipv4.tcp_mtu_probing = $mtu_probing
 net.ipv4.tcp_slow_start_after_idle = $slow_start
 net.ipv4.tcp_notsent_lowat = $notsent_lowat
 net.ipv4.tcp_limit_output_bytes = $limit_output
 EOF
-  if [ -f /etc/sysctl.conf ]; then
-    if grep -q '^net\.ipv4\.tcp_mtu_probing[[:space:]]*=' /etc/sysctl.conf; then
-      sed -i "s|^net\\.ipv4\\.tcp_mtu_probing[[:space:]]*=.*|net.ipv4.tcp_mtu_probing=$mtu_probing|" /etc/sysctl.conf
-    else
-      printf '\nnet.ipv4.tcp_mtu_probing=%s\n' "$mtu_probing" >> /etc/sysctl.conf
-    fi
-  fi
-  sysctl -w \
+  if sysctl -w \
     net.ipv4.tcp_mtu_probing="$mtu_probing" \
     net.ipv4.tcp_slow_start_after_idle="$slow_start" \
     net.ipv4.tcp_notsent_lowat="$notsent_lowat" \
-    net.ipv4.tcp_limit_output_bytes="$limit_output" >/dev/null || die "OpenWrt 最小参数加载失败，备份目录：$backup_dir"
+    net.ipv4.tcp_limit_output_bytes="$limit_output" >/dev/null; then
+    :
+  else
+    restore_manual_backup "$backup_dir" >/dev/null 2>&1 || true
+    die "OpenWrt 最小参数加载失败，已尝试回滚；备份目录：$backup_dir"
+  fi
   LAST_MANUAL_BACKUP="$backup_dir"
   info "OpenWrt 最小参数已保存并加载：$OPENWRT_MINIMAL_FILE"
   info "备份目录：$backup_dir"
@@ -2273,19 +2348,20 @@ ai_auto_mode() {
   seconds="12"
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --peer|--host|--对端|--主机) host="$2"; shift 2 ;;
-      --port|--iperf-port|--端口|--测速端口) port="$2"; shift 2 ;;
-      --objective|--目标) objective="$2"; shift 2 ;;
-      --rounds|--轮数) rounds="$2"; shift 2 ;;
-      --role|--角色) role="$2"; shift 2 ;;
-      --seconds|--时长) seconds="$2"; shift 2 ;;
+      --peer|--host) require_option_value "$1" "${2:-}"; host="$2"; shift 2 ;;
+      --port|--iperf-port) require_option_value "$1" "${2:-}"; port="$2"; shift 2 ;;
+      --objective) require_option_value "$1" "${2:-}"; objective="$2"; shift 2 ;;
+      --rounds) require_option_value "$1" "${2:-}"; rounds="$2"; shift 2 ;;
+      --role) require_option_value "$1" "${2:-}"; role="$2"; shift 2 ;;
+      --seconds) require_option_value "$1" "${2:-}"; seconds="$2"; shift 2 ;;
       *) die "未知 AI自动优化 参数：$1" ;;
     esac
   done
-  [ -n "$host" ] || die "AI自动优化 需要 --对端"
+  [ -n "$host" ] || die "AI自动优化 需要 --host"
   # 兼容旧版本的 balanced；新语义统一为“快速起速”。
   [ "$objective" = "balanced" ] && objective="startup"
   case "$objective" in startup|throughput|retrans) ;; *) die "--objective 只支持 startup、throughput、retrans" ;; esac
+  validate_port_value "$port" || die "--port 必须在 1 和 65535 之间。"
   validate_positive_int_range "$rounds" 1 "$TCP_TUNE_AI_MAX_ROUNDS" || die "--rounds 必须在 1 和 $TCP_TUNE_AI_MAX_ROUNDS 之间。"
   validate_positive_int_range "$seconds" 5 60 || die "--seconds 必须在 5 和 60 之间。"
 
@@ -2508,6 +2584,12 @@ profile_probe_metrics() {
   rtt_ms="$(detect_rtt_ms "$host")"
   upload_json="$(run_iperf_client "$host" "$port" 0 8 "$bind_ip" 2>/dev/null || true)"
   download_json="$(run_iperf_client "$host" "$port" 1 8 "$bind_ip" 2>/dev/null || true)"
+  if ! printf '%s' "$upload_json" | grep -q '"end"'; then
+    die "预制参数检测失败：上传 iperf3 未返回有效结果，请先确认服务端测速端口可达。"
+  fi
+  if ! printf '%s' "$download_json" | grep -q '"end"'; then
+    die "预制参数检测失败：下载 iperf3 未返回有效结果，请先确认服务端测速端口可达。"
+  fi
   upload_bps="$(printf '%s\n' "$upload_json" | extract_bps)"
   upload_retr="$(printf '%s\n' "$upload_json" | extract_retransmits)"
   upload_first="$(printf '%s\n' "$upload_json" | extract_first_interval_bps)"
@@ -2686,6 +2768,10 @@ run_iperf_client() {
   reverse="$3"
   seconds="$4"
   bind_ip="${5:-}"
+  [ -n "$host" ] || die "iperf3 需要 host"
+  validate_port_value "$port" || die "iperf3 port 必须在 1 和 65535 之间。"
+  case "$reverse" in 0|1) ;; *) die "iperf3 reverse 必须是 0 或 1。" ;; esac
+  validate_positive_int_range "$seconds" 1 86400 || die "iperf3 seconds 必须是正整数。"
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法测试。"
   # host 是 IPv6 地址（含冒号）时不能用 IPv4 源地址绑定，否则 iperf3 报 Invalid argument
   case "$host" in
@@ -2920,6 +3006,10 @@ auto_tune() {
   [ "$#" -ge 12 ] && eval "aggressive=\${12:-0}"
   [ "$#" -ge 13 ] && eval "allow_same_public=\${13:-0}"
 
+  case "$objective" in
+    retrans|throughput|startup) ;;
+    *) die "--objective 只支持 retrans、throughput、startup" ;;
+  esac
   need_root
   install_runtime_deps
   ensure_tcp_baseline
@@ -3249,6 +3339,9 @@ ACTIVE_PROCESSES_LOCK = threading.Lock()
 def check_token(handler):
     token = handler.headers.get("X-TCP-Tune-Token", "")
     if token == TOKEN:
+        return True
+    auth = handler.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and auth[7:].strip() == TOKEN:
         return True
     query = parse_qs(urlparse(handler.path).query)
     return query.get("token", [""])[0] == TOKEN
@@ -3983,7 +4076,6 @@ join_mode() {
   [ -n "$token" ] || die "缺少 --token"
   install_runtime_deps
   detect_os
-  ensure_tcp_baseline
   client_lan_ip="$(local_lan_ipv4 || true)"
   [ -n "$client_lan_ip" ] || client_lan_ip="unknown"
   TUNE_REPORT_PEER="$peer"
@@ -4023,7 +4115,6 @@ preset_write_menu() {
   echo
   need_root
   install_runtime_deps
-  ensure_tcp_baseline
   bind_ip="$(local_lan_ipv4 || true)"
   case "$host" in
     127.*|localhost|"$bind_ip") bind_ip="" ;;
@@ -4142,7 +4233,8 @@ run_client_optimization() {
   case "$PROMPT_REPLY" in
     2) objective="throughput"; target_retr="10"; rounds="4" ;;
     3) objective="startup"; target_retr="5"; rounds="3" ;;
-    *) objective="retrans"; target_retr="0"; rounds="5" ;;
+    1) objective="retrans"; target_retr="0"; rounds="5" ;;
+    *) warn "无效优化目标。"; return_to_menu; return 0 ;;
   esac
   selected_label="$(objective_label "$objective")"
 
@@ -4161,7 +4253,8 @@ run_client_optimization() {
   fi
   case "$PROMPT_REPLY" in
     2) reverse="0" ;;
-    *) reverse="1" ;;
+    1) reverse="1" ;;
+    *) warn "无效测试方向。"; return_to_menu; return 0 ;;
   esac
 
   auto_tune "$host" "$iperf_port" "$objective" "$target_retr" "$rounds" "$reverse" 0 0 100 "" 0.79 0 "$allow_same_public"
@@ -4188,7 +4281,8 @@ run_client_ai_optimization() {
   case "$PROMPT_REPLY" in
     2) objective="throughput" ;;
     3) objective="retrans" ;;
-    *) objective="startup" ;;
+    1) objective="startup" ;;
+    *) warn "无效 AI 调参目标。"; return_to_menu; return 0 ;;
   esac
 
   echo
@@ -4219,7 +4313,7 @@ run_client_ai_optimization() {
   esac
 
   # 这里复用命令行 AI 自动优化入口，避免面板和命令行维护两套调参逻辑。
-  ai_auto_mode --对端 "$host" --端口 "$iperf_port" --目标 "$objective" --轮数 "$rounds" --角色 auto
+  ai_auto_mode --host "$host" --port "$iperf_port" --objective "$objective" --rounds "$rounds" --role auto
 }
 
 client_menu() {
@@ -4346,7 +4440,7 @@ menu() {
           1) objective="retrans" ;;
           2) objective="throughput" ;;
           3) objective="startup" ;;
-          *) objective="retrans" ;;
+          *) warn "无效优化目标。"; pause_for_enter; continue ;;
         esac
         auto_tune "$host" "$IPERF_PORT" "$objective" 0 5 1
         ;;
@@ -4372,7 +4466,7 @@ menu() {
           1) objective="retrans" ;;
           2) objective="throughput" ;;
           3) objective="startup" ;;
-          *) objective="retrans" ;;
+          *) warn "无效推荐目标。"; pause_for_enter; continue ;;
         esac
         print_recommendation "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0
         if ! prompt_read "是否即时保存这组智能参数？[y/N] "; then save_ans=""; else save_ans="$PROMPT_REPLY"; fi
@@ -4420,7 +4514,7 @@ $APP_NAME $APP_VERSION
   sh tcp-tune.sh apply-buffers RMEM_MAX WMEM_MAX
   sh tcp-tune.sh auto --host IP --direction download --objective retrans --target-retr 0 --rtt-ms 100
   sh tcp-tune.sh AI测速
-  sh tcp-tune.sh AI自动优化 --对端 IPV6 --目标 startup --轮数 5
+  sh tcp-tune.sh AI自动优化 --host IPV6 --objective startup --rounds 5
   sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
   sh tcp-tune.sh local-minimal --ipv6-peer IPV6
   sh tcp-tune.sh vps-adapt --peer-ipv6 IPV6 --profile cubic-safe
@@ -4543,13 +4637,16 @@ main() {
     server|listen)
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --port) AGENT_PORT="$2"; shift 2 ;;
-          --iperf-port) IPERF_PORT="$2"; shift 2 ;;
-          --ttl) SESSION_TTL="$2"; shift 2 ;;
-          --public-url) LISTEN_PUBLIC_URL="$2"; shift 2 ;;
+          --port) require_option_value "$1" "${2:-}"; AGENT_PORT="$2"; shift 2 ;;
+          --iperf-port) require_option_value "$1" "${2:-}"; IPERF_PORT="$2"; shift 2 ;;
+          --ttl) require_option_value "$1" "${2:-}"; SESSION_TTL="$2"; shift 2 ;;
+          --public-url) require_option_value "$1" "${2:-}"; LISTEN_PUBLIC_URL="$2"; shift 2 ;;
           *) die "未知 $cmd 参数：$1" ;;
         esac
       done
+      validate_port_value "$AGENT_PORT" || die "--port 必须在 1 和 65535 之间。"
+      validate_port_value "$IPERF_PORT" || die "--iperf-port 必须在 1 和 65535 之间。"
+      validate_positive_int_range "$SESSION_TTL" 1 2592000 || die "--ttl 必须是正整数。"
       if [ "$cmd" = "server" ]; then
         server_mode
       else
@@ -4578,9 +4675,10 @@ main() {
       reverse="1"
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --host) host="$2"; shift 2 ;;
-          --port) port="$2"; shift 2 ;;
+          --host) require_option_value "$1" "${2:-}"; host="$2"; shift 2 ;;
+          --port) require_option_value "$1" "${2:-}"; port="$2"; shift 2 ;;
           --direction)
+            require_option_value "$1" "${2:-}"
             case "$2" in
               download|reverse) reverse="1" ;;
               upload|forward) reverse="0" ;;
@@ -4590,20 +4688,21 @@ main() {
             ;;
           --download|--reverse) reverse="1"; shift ;;
           --upload|--forward) reverse="0"; shift ;;
-          --objective) objective="$2"; shift 2 ;;
-          --target-retr) target_retr="$2"; shift 2 ;;
-          --rounds) rounds="$2"; shift 2 ;;
-          --local-mbps) local_mbps="$2"; shift 2 ;;
-          --peer-mbps) peer_mbps="$2"; shift 2 ;;
-          --rtt-ms) rtt_ms="$2"; shift 2 ;;
-          --memory-mb) memory_mb_value="$2"; shift 2 ;;
-          --ramp) ramp_rate="$2"; shift 2 ;;
+          --objective) require_option_value "$1" "${2:-}"; objective="$2"; shift 2 ;;
+          --target-retr) require_option_value "$1" "${2:-}"; target_retr="$2"; shift 2 ;;
+          --rounds) require_option_value "$1" "${2:-}"; rounds="$2"; shift 2 ;;
+          --local-mbps) require_option_value "$1" "${2:-}"; local_mbps="$2"; shift 2 ;;
+          --peer-mbps) require_option_value "$1" "${2:-}"; peer_mbps="$2"; shift 2 ;;
+          --rtt-ms) require_option_value "$1" "${2:-}"; rtt_ms="$2"; shift 2 ;;
+          --memory-mb) require_option_value "$1" "${2:-}"; memory_mb_value="$2"; shift 2 ;;
+          --ramp) require_option_value "$1" "${2:-}"; ramp_rate="$2"; shift 2 ;;
           --aggressive) aggressive="1"; shift ;;
           --allow-same-public-ip) allow_same_public="1"; shift ;;
           *) die "未知 auto 参数：$1" ;;
         esac
       done
       [ -n "$host" ] || die "auto 需要 --host"
+      validate_port_value "$port" || die "--port 必须在 1 和 65535 之间。"
       auto_tune "$host" "$port" "$objective" "$target_retr" "$rounds" "$reverse" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive" "$allow_same_public"
       ;;
     stop-agent) stop_agent ;;

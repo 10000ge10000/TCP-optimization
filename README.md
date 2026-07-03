@@ -74,6 +74,7 @@ Windows 无 winget/choco/scoop 时，脚本会把 iperf3 下载到用户缓存�
 [3] 查看本机状态      系统 / TCP 参数
 [4] 查看服务端状态    会话 / 测速服务
 [5] 查看过程记录      中文摘要日志
+[8] iperf3 速度测试   简单测速，不修改参数
 [6] 回滚最近修改      恢复最近一次参数写入
 [7] 停止会话并退出    清理 Agent / iperf3
 [q] 退出客户端        不停止服务端会话
@@ -145,7 +146,7 @@ net.ipv4.tcp_wmem
 
 ```sh
 sh tcp-tune.sh AI测速
-sudo sh tcp-tune.sh AI自动优化 --对端 2406:xxxx:xxxx::1 --目标 startup --轮数 3
+sudo sh tcp-tune.sh AI自动优化 --host 2406:xxxx:xxxx::1 --objective startup --rounds 3
 sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
 ```
 
@@ -161,6 +162,8 @@ AI 不能执行任意命令，只能返回 JSON。脚本会校验字段白名单
 ```sh
 sudo sh tcp-tune.sh rollback
 ```
+
+`rollback` 会同时查找普通参数写入备份和 AI / 手动适配产生的 `manual-*` 备份，并尽量恢复写入前的运行时 sysctl 值。
 
 备份目录通常在：
 

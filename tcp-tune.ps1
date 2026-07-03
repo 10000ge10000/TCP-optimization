@@ -435,8 +435,14 @@ function Invoke-Iperf3Speedtest {
 
 function Get-IperfMetrics {
   param([object]$Result)
+  if (-not $Result -or -not $Result.end) {
+    throw "iperf3 测试失败：未获得有效结果。"
+  }
   $summary = $Result.end.sum_received
   if (-not $summary) { $summary = $Result.end.sum_sent }
+  if (-not $summary) {
+    throw "iperf3 测试失败：缺少传输汇总。"
+  }
 
   $retransmits = 0
   if ($Result.end.sum_sent -and $null -ne $Result.end.sum_sent.retransmits) {
@@ -445,6 +451,9 @@ function Get-IperfMetrics {
   $bitsPerSecond = 0.0
   if ($summary -and $summary.bits_per_second) {
     $bitsPerSecond = [double]$summary.bits_per_second
+  }
+  if ($bitsPerSecond -le 0) {
+    throw "iperf3 测试失败：速率为 0，请检查对端端口和链路。"
   }
   $firstSecondBits = 0.0
   if ($Result.intervals -and $Result.intervals.Count -gt 0 -and $Result.intervals[0].sum.bits_per_second) {
@@ -533,9 +542,10 @@ function Invoke-WindowsAITuning {
   $modeChoice = Read-Host "请选择 AI 调参目标 [1-3/0]"
   if (Test-BackChoice $modeChoice) { return $false }
   switch ($modeChoice) {
+    "1" { $objective = "startup"; $objectiveName = "快速起速" }
     "2" { $objective = "throughput"; $objectiveName = "吞吐优先" }
     "3" { $objective = "retrans"; $objectiveName = "重传优先" }
-    default { $objective = "startup"; $objectiveName = "快速起速" }
+    default { Write-Host "无效 AI 调参目标。" -ForegroundColor Yellow; return $false }
   }
 
   Write-Host ""
@@ -809,9 +819,10 @@ function Select-WindowsOptimization {
   $modeChoice = Read-Host "请选择优化目标 [1-3/0]"
   if (Test-BackChoice $modeChoice) { return $false }
   switch ($modeChoice) {
+    "1" { $selectedObjective = "retrans"; $selectedRounds = 5; $selectedTarget = 0 }
     "2" { $selectedObjective = "throughput"; $selectedRounds = 3; $selectedTarget = 10 }
     "3" { $selectedObjective = "startup"; $selectedRounds = 3; $selectedTarget = 5 }
-    default { $selectedObjective = "retrans"; $selectedRounds = 5; $selectedTarget = 0 }
+    default { Write-Host "无效优化目标。" -ForegroundColor Yellow; return $false }
   }
 
   Write-Host ""
@@ -823,7 +834,11 @@ function Select-WindowsOptimization {
   Write-Host ("{0} · 默认下载方向" -f (Get-ObjectiveLabel -Value $selectedObjective))
   $directionChoice = Read-Host "请选择测试方向 [1-2/0]"
   if (Test-BackChoice $directionChoice) { return $false }
-  $selectedDirection = if ($directionChoice -eq "2") { "upload" } else { "download" }
+  switch ($directionChoice) {
+    "1" { $selectedDirection = "download" }
+    "2" { $selectedDirection = "upload" }
+    default { Write-Host "无效测试方向。" -ForegroundColor Yellow; return $false }
+  }
   Invoke-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress -SelectedObjective $selectedObjective -SelectedDirection $selectedDirection -SelectedRounds $selectedRounds -SelectedTargetRetr $selectedTarget
   return $true
 }
