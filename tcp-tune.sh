@@ -376,8 +376,15 @@ install_pkg() {
   fi
   case "$PKG_MANAGER" in
     apt)
-      apt-get update
-      apt-get install -y "$pkg"
+      if [ "$pkg" = "iperf3" ] && have_cmd debconf-set-selections; then
+        printf '%s\n' "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections
+      fi
+      DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update
+      DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a UCF_FORCE_CONFFOLD=1 \
+        apt-get install -y \
+          -o Dpkg::Options::=--force-confdef \
+          -o Dpkg::Options::=--force-confold \
+          "$pkg"
       ;;
     dnf)
       dnf install -y "$pkg"
