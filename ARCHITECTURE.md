@@ -8,7 +8,7 @@
 https://github.com/10000ge10000/TCP-optimization
 ```
 
-它面向公网 VPS 与 OpenWrt / Linux / macOS / Windows 客户端，通过默认只读服务端、临时 HTTP Agent、iperf3 测试结果和可选 AI 决策完成状态交换、测速、参数推荐、自动调优和回滚。
+它面向公网 VPS 与 OpenWrt / Linux / macOS / Windows 客户端，通过默认只读服务端、临时 HTTP Agent、iperf3 测试结果和可选 AI 决策完成状态交换、测速、参数推荐、自动调优、首次快照恢复和回滚。
 
 核心体验：
 
@@ -23,6 +23,7 @@ https://github.com/10000ge10000/TCP-optimization
   -> 上报状态
   -> 进入客户端菜单
 客户端通过菜单进行测速和本机优化，服务端默认仅展示状态和结果
+恢复默认值时，客户端恢复本机首次快照，并请求服务端恢复启动时快照
 显式运行 ai-auto / vps-adapt / local-minimal 时，当前机器可执行受控 sysctl 写入
 ```
 
@@ -42,14 +43,14 @@ https://github.com/10000ge10000/TCP-optimization
 
 - 系统识别：识别 OpenWrt、Debian/Ubuntu、RHEL 系、macOS。
 - 依赖安装：按包管理器自动安装 iperf3、curl、python3。
-- 服务端模式：启动 Agent、iperf3，输出客户端命令并进入前台只读监控；默认不修改服务端 TCP 参数。
-- 客户端模式：探测并上报局域网 IPv4，进入客户端菜单。
+- 服务端模式：启动 Agent、iperf3，记录首次 TCP/sysctl 快照，输出客户端命令并进入前台只读监控；默认不修改服务端 TCP 参数。
+- 客户端模式：探测并上报局域网 IPv4，记录本机首次 TCP/sysctl 快照，进入客户端菜单。
 - 智能推荐：按 BDP、RTT、内存和目标生成 TCP 参数。
 - 自动优化：提供重传优先、吞吐优先、快速起速三种目标，按 iperf3 Retr、总吞吐和首秒吞吐迭代调整参数；最后一轮不写入未经复测的参数，指标退化时自动撤销最新调整。
 - AI 自动调参：`ai-auto` 将脱敏测速摘要发送给项目 AI 网关，模型只返回结构化 JSON，脚本按白名单和上下限校验后执行。
 - 双端适配：`vps-adapt` 主要调整 VPS 发送侧，`local-minimal` 只对 OpenWrt 写入少量必要 TCP 参数。
 - 客户端展示：隐藏代理公网地址，展示本机 LAN 地址和语义化测速结果；原始 sysctl 参数降级为详细信息。
-- 备份回滚：每次写入前保存 live sysctl 快照。
+- 备份回滚：每次写入前保存 live sysctl 快照；恢复默认值使用首次运行快照，不消费最近一次回滚备份。
 - 安全清理：停止本工具创建并记录 pid 的临时 Agent/iperf3。
 
 `tcp-tune.ps1`：
@@ -126,13 +127,15 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 | 方法 | 路径 | 作用 |
 |---|---|---|
 | `GET` | `/status` | 获取服务端状态 |
+| `GET` | `/defaults` | 查询服务端首次默认快照是否已记录 |
 | `GET` | `/events` | 获取事件和客户端上报 |
 | `GET` | `/state` | 获取原始 Agent 状态 |
 | `POST` | `/report` | 客户端上报状态或测速结果 |
 | `POST` | `/test` | 触发服务端 iperf3 测试 |
+| `POST` | `/restore-defaults` | 恢复服务端启动时记录的首次 TCP/sysctl 快照 |
 | `POST` | `/stop` | 停止服务端会话 |
 
-所有端点都必须通过请求头 `X-TCP-Tune-Token` 或 query token 校验。文档和日志不应泄露 token。普通 `server` 会话中的 `/optimize`、`/apply-profile`、`/apply-buffers` 仍明确返回 `403 server is read-only`；VPS 写入必须通过本机显式命令 `ai-auto` 或 `vps-adapt` 触发。
+所有端点都必须通过请求头 `X-TCP-Tune-Token` 或 query token 校验。文档和日志不应泄露 token。普通 `server` 会话中的 `/optimize`、`/apply-profile`、`/apply-buffers` 仍明确返回 `403 server is read-only`；`/restore-defaults` 是固定恢复动作，只能回放服务端启动时记录的快照，不接受客户端提交的任意参数。VPS 主动调参写入必须通过本机显式命令 `ai-auto` 或 `vps-adapt` 触发。
 
 ## 6. 配置与状态
 
@@ -160,6 +163,8 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 ```text
 /var/lib/tcp-tune/
 ├── backups/
+├── initial-defaults/
+├── initial-defaults.path
 ├── rolled-back/
 ├── sessions/
 ├── agent-PORT.pid

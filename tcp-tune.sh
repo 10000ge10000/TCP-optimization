@@ -319,6 +319,14 @@ ensure_state_dir() {
   mkdir -p "$STATE_DIR/backups" "$STATE_DIR/sessions" "$STATE_DIR/rolled-back"
 }
 
+initial_defaults_dir() {
+  printf '%s\n' "$STATE_DIR/initial-defaults"
+}
+
+initial_defaults_path_file() {
+  printf '%s\n' "$STATE_DIR/initial-defaults.path"
+}
+
 detect_os() {
   OS_ID="unknown"
   OS_NAME="Unknown"
@@ -1297,6 +1305,59 @@ restore_manual_backup() {
   info "已按手动备份回滚：$backup_dir"
 }
 
+initial_defaults_available() {
+  path_file="$(initial_defaults_path_file)"
+  dir="$(cat "$path_file" 2>/dev/null || true)"
+  [ -n "$dir" ] || dir="$(initial_defaults_dir)"
+  [ -d "$dir" ] && [ -f "$dir/restore-current.conf" ]
+}
+
+ensure_initial_defaults_snapshot() {
+  ensure_state_dir
+  path_file="$(initial_defaults_path_file)"
+  dir="$(cat "$path_file" 2>/dev/null || true)"
+  if [ -n "$dir" ] && [ -d "$dir" ] && [ -f "$dir/restore-current.conf" ]; then
+    printf '%s\n' "$dir"
+    return 0
+  fi
+  dir="$(initial_defaults_dir)"
+  if [ -d "$dir" ] && [ -f "$dir/restore-current.conf" ]; then
+    printf '%s\n' "$dir" > "$path_file"
+    printf '%s\n' "$dir"
+    return 0
+  fi
+  tmp_dir="$(manual_backup_begin "initial-defaults")" || return 1
+  if [ -e "$dir" ]; then
+    dir="$(unique_path "$dir")"
+  fi
+  mv "$tmp_dir" "$dir"
+  {
+    printf 'created_at=%s\n' "$(date +%s)"
+    printf 'role=%s\n' "${1:-local}"
+    printf 'note=%s\n' "Initial TCP-optimization defaults snapshot. Restore only through restore-defaults."
+  } > "$dir/metadata"
+  printf '%s\n' "$dir" > "$path_file"
+  LAST_MANUAL_BACKUP="$dir"
+  printf '%s\n' "$dir"
+}
+
+ensure_initial_defaults_if_root() {
+  if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
+    return 1
+  fi
+  ensure_initial_defaults_snapshot "${1:-local}" >/dev/null 2>&1
+}
+
+restore_initial_defaults() {
+  need_root
+  path_file="$(initial_defaults_path_file)"
+  dir="$(cat "$path_file" 2>/dev/null || true)"
+  [ -n "$dir" ] || dir="$(initial_defaults_dir)"
+  [ -d "$dir" ] && [ -f "$dir/restore-current.conf" ] || die "未找到首次运行默认值快照。"
+  restore_manual_backup "$dir"
+  info "已恢复首次运行记录的默认值：$dir"
+}
+
 validate_bool_number() {
   case "$1" in
     0|1) return 0 ;;
@@ -2107,6 +2168,32 @@ summary_regressed() {
   '
 }
 
+summary_objective_succeeded() {
+  objective="$1"
+  before="$2"
+  after="$3"
+  target_retr="${4:-0}"
+  before_up="$(printf '%s\n' "$before" | metric_from_summary upload_bits_per_second)"
+  after_up="$(printf '%s\n' "$after" | metric_from_summary upload_bits_per_second)"
+  before_down="$(printf '%s\n' "$before" | metric_from_summary download_bits_per_second)"
+  after_down="$(printf '%s\n' "$after" | metric_from_summary download_bits_per_second)"
+  before_ur="$(printf '%s\n' "$before" | metric_from_summary upload_retransmits)"
+  after_ur="$(printf '%s\n' "$after" | metric_from_summary upload_retransmits)"
+  before_dr="$(printf '%s\n' "$before" | metric_from_summary download_retransmits)"
+  after_dr="$(printf '%s\n' "$after" | metric_from_summary download_retransmits)"
+  before_uf="$(printf '%s\n' "$before" | metric_from_summary upload_first_second_bits_per_second)"
+  after_uf="$(printf '%s\n' "$after" | metric_from_summary upload_first_second_bits_per_second)"
+  before_df="$(printf '%s\n' "$before" | metric_from_summary download_first_second_bits_per_second)"
+  after_df="$(printf '%s\n' "$after" | metric_from_summary download_first_second_bits_per_second)"
+  before_speed="$(awk -v up="${before_up:-0}" -v down="${before_down:-0}" 'BEGIN { printf "%.0f\n", up + down }')"
+  after_speed="$(awk -v up="${after_up:-0}" -v down="${after_down:-0}" 'BEGIN { printf "%.0f\n", up + down }')"
+  before_retr="$(awk -v up="${before_ur:-0}" -v down="${before_dr:-0}" 'BEGIN { printf "%.0f\n", up + down }')"
+  after_retr="$(awk -v up="${after_ur:-0}" -v down="${after_dr:-0}" 'BEGIN { printf "%.0f\n", up + down }')"
+  before_first="$(awk -v up="${before_uf:-0}" -v down="${before_df:-0}" 'BEGIN { printf "%.0f\n", up + down }')"
+  after_first="$(awk -v up="${after_uf:-0}" -v down="${after_df:-0}" 'BEGIN { printf "%.0f\n", up + down }')"
+  objective_run_succeeded "$objective" "$before_speed" "$after_speed" "$before_retr" "$after_retr" "$before_first" "$after_first" "$target_retr"
+}
+
 summary_objective_note() {
   objective="$1"
   before="$2"
@@ -2361,6 +2448,11 @@ ai_auto_mode() {
   # 兼容旧版本的 balanced；新语义统一为“快速起速”。
   [ "$objective" = "balanced" ] && objective="startup"
   case "$objective" in startup|throughput|retrans) ;; *) die "--objective 只支持 startup、throughput、retrans" ;; esac
+  case "$objective" in
+    retrans) target_retr="0" ;;
+    throughput) target_retr="10" ;;
+    startup) target_retr="5" ;;
+  esac
   validate_port_value "$port" || die "--port 必须在 1 和 65535 之间。"
   validate_positive_int_range "$rounds" 1 "$TCP_TUNE_AI_MAX_ROUNDS" || die "--rounds 必须在 1 和 $TCP_TUNE_AI_MAX_ROUNDS 之间。"
   validate_positive_int_range "$seconds" 5 60 || die "--seconds 必须在 5 和 60 之间。"
@@ -2427,6 +2519,13 @@ ai_auto_mode() {
     print_ai_comparison_table "$previous_summary" "$after_summary"
     if summary_regressed "$objective" "$previous_summary" "$after_summary"; then
       warn "复测指标退化超过阈值，正在回滚本轮 AI 调整。"
+      restore_manual_backup "$current_backup"
+      post_client_stage "ai" "rollback" "$(objective_label "$objective")"
+      ai_rolled_back="1"
+      break
+    fi
+    if ! summary_objective_succeeded "$objective" "$previous_summary" "$after_summary" "$target_retr"; then
+      warn "本轮 AI 调整没有达成目标指标，正在回滚本轮参数。"
       restore_manual_backup "$current_backup"
       post_client_stage "ai" "rollback" "$(objective_label "$objective")"
       ai_rolled_back="1"
@@ -2888,6 +2987,68 @@ extract_first_interval_bps() {
   '
 }
 
+objective_step_improved() {
+  objective="$1"
+  before_bps="${2:-0}"
+  after_bps="${3:-0}"
+  before_retr="${4:-0}"
+  after_retr="${5:-0}"
+  before_startup_bps="${6:-0}"
+  after_startup_bps="${7:-0}"
+  target_retr="${8:-0}"
+  awk -v objective="$objective" -v bb="$before_bps" -v ab="$after_bps" \
+      -v br="$before_retr" -v ar="$after_retr" -v bs="$before_startup_bps" \
+      -v as="$after_startup_bps" -v target="$target_retr" '
+    BEGIN {
+      ok = 0
+      if (objective == "retrans") {
+        if (ar <= target) ok = 1
+        if (br > target && ar < br && (bb <= 0 || ab >= bb * 0.85)) ok = 1
+      } else if (objective == "throughput") {
+        if (bb > 0 && ab >= bb * 1.02) {
+          if (br <= 100 || ar <= br * 1.35 || ab >= bb * 1.08) ok = 1
+        }
+      } else {
+        if (bs > 0 && as >= bs * 1.02 && (bb <= 0 || ab >= bb * 0.80)) {
+          if (br <= 100 || ar <= br * 2.0 || ar <= 500) ok = 1
+        }
+      }
+      exit !ok
+    }
+  '
+}
+
+objective_run_succeeded() {
+  objective="$1"
+  first_bps="${2:-0}"
+  final_bps="${3:-0}"
+  first_retr="${4:-0}"
+  final_retr="${5:-0}"
+  first_startup_bps="${6:-0}"
+  final_startup_bps="${7:-0}"
+  target_retr="${8:-0}"
+  awk -v objective="$objective" -v fb="$first_bps" -v lb="$final_bps" \
+      -v fr="$first_retr" -v lr="$final_retr" -v fs="$first_startup_bps" \
+      -v ls="$final_startup_bps" -v target="$target_retr" '
+    BEGIN {
+      ok = 0
+      if (objective == "retrans") {
+        if (lr <= target) ok = 1
+        if (fr > target && lr < fr && (fb <= 0 || lb >= fb * 0.85)) ok = 1
+      } else if (objective == "throughput") {
+        if (fb > 0 && lb >= fb * 1.03) {
+          if (fr <= 100 || lr <= fr * 1.35 || lb >= fb * 1.08) ok = 1
+        }
+      } else {
+        if (fs > 0 && ls >= fs * 1.03 && (fb <= 0 || lb >= fb * 0.80)) {
+          if (fr <= 100 || lr <= fr * 2.0 || lr <= 500) ok = 1
+        }
+      }
+      exit !ok
+    }
+  '
+}
+
 current_max_buffers() {
   rmem="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 67108864)"
   wmem="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 67108864)"
@@ -3119,6 +3280,21 @@ auto_tune() {
       post_json "$TUNE_REPORT_PEER/report" "$TUNE_REPORT_TOKEN" "$report_data" >/dev/null 2>&1 || true
     fi
 
+    if [ "$applied_change_count" -gt 0 ] && [ -n "$previous_retr" ]; then
+      if objective_step_improved "$objective" "$previous_bps" "$bps" "$previous_retr" "$retr" "$previous_startup_bps" "$startup_bps" "$target_retr"; then
+        ui_note "验证" "上一轮写入已让目标指标改善，保留本轮参数。"
+      else
+        warn "上一轮写入没有让目标指标改善，正在撤销这次参数调整。"
+        rollback_last
+        applied_change_count=$((applied_change_count - 1))
+        rolled_back_regression="1"
+        final_retr="$previous_retr"
+        final_bps="$previous_bps"
+        final_startup_bps="$previous_startup_bps"
+        break
+      fi
+    fi
+
     regressed="0"
     if [ "$applied_change_count" -gt 0 ] && [ -n "$previous_retr" ]; then
       case "$objective" in
@@ -3176,11 +3352,13 @@ auto_tune() {
         fi
       fi
       if [ "$retrans_target_met" = "1" ]; then
-        if [ "$i" -gt 1 ] || [ "$applied_change_count" -gt 0 ]; then
-          echo
+        echo
+        if [ "$applied_change_count" -gt 0 ]; then
           ui_note "结果" "目标已达成，进入结果页。"
-          break
+        else
+          ui_note "结果" "基线已达到重传目标，不写入额外参数。"
         fi
+        break
       fi
     fi
     if [ "$i" -ge "$rounds" ]; then
@@ -3219,6 +3397,16 @@ auto_tune() {
   [ "$completed_rounds" = "0" ] && completed_rounds="$rounds"
   if [ "$applied_change_count" -gt 0 ] && [ -n "${auto_initial_backup:-}" ]; then
     if objective_numbers_regressed "$objective" "${first_bps:-0}" "$final_bps" "${first_retr:-0}" "$final_retr" "${first_startup_bps:-0}" "$final_startup_bps" "$target_retr"; then
+      restore_manual_backup "$auto_initial_backup" >/dev/null 2>&1 || true
+      rolled_back_regression="1"
+      applied_change_count="0"
+      final_retr="${first_retr:-0}"
+      final_bps="${first_bps:-0}"
+      final_startup_bps="${first_startup_bps:-0}"
+    fi
+  fi
+  if [ "$applied_change_count" -gt 0 ] && [ -n "${auto_initial_backup:-}" ]; then
+    if ! objective_run_succeeded "$objective" "${first_bps:-0}" "$final_bps" "${first_retr:-0}" "$final_retr" "${first_startup_bps:-0}" "$final_startup_bps" "$target_retr"; then
       restore_manual_backup "$auto_initial_backup" >/dev/null 2>&1 || true
       rolled_back_regression="1"
       applied_change_count="0"
@@ -3423,6 +3611,7 @@ def event_text(event):
             "preset-probe": "预制参数检测",
             "preset-apply": "预制参数写入",
             "rollback": "回滚",
+            "restore-defaults": "恢复默认值",
             "auto": "稳定自动优化",
             "ai": "AI 智能优化",
         }
@@ -3448,6 +3637,8 @@ def event_text(event):
         return f"{stamp} 客户端连接：{event.get('os') or event.get('role', 'unknown')} {event.get('lan_ip') or ''}".strip()
     if action == "test":
         return f"{stamp} 服务端测速任务完成"
+    if action == "restore-defaults":
+        return f"{stamp} 服务端恢复默认值{'成功' if event.get('result') == 0 else '失败'}"
     if action == "stop-request":
         return f"{stamp} 收到停止会话请求"
     return f"{stamp} {action or '事件'}"
@@ -3486,6 +3677,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/status":
             result = run_cmd([SCRIPT, "status"])
             write_json(self, 200, {"ok": result["code"] == 0, "result": result})
+            return
+        if path == "/defaults":
+            result = run_cmd([SCRIPT, "defaults-status"])
+            write_json(self, 200, {"ok": result["code"] == 0, "available": result["code"] == 0, "result": result})
             return
         write_json(self, 404, {"ok": False, "error": "not found"})
 
@@ -3538,6 +3733,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in {"/optimize", "/apply-profile", "/apply-buffers"}:
             write_json(self, 403, {"ok": False, "error": "server is read-only"})
             return
+        if path == "/restore-defaults":
+            result = run_cmd([SCRIPT, "restore-defaults"])
+            STATE["events"].append({"time": time.time(), "action": "restore-defaults", "result": result["code"]})
+            write_json(self, 200, {"ok": result["code"] == 0, "result": result})
+            return
         if path == "/stop":
             STATE["events"].append({"time": time.time(), "action": "stop-request"})
             write_json(self, 200, {"ok": True, "message": "agent stopping"})
@@ -3574,6 +3774,7 @@ listen_mode() {
   install_runtime_deps
   ensure_dependency python3 python3 || die "listen 模式需要 python3 运行临时 HTTP Agent。"
   ensure_state_dir
+  ensure_initial_defaults_snapshot "server" >/dev/null || warn "无法记录服务端首次默认值快照，恢复默认值菜单将只恢复客户端。"
   if [ "${DRY_RUN:-0}" = "1" ]; then
     if [ -n "$LISTEN_PUBLIC_URL" ]; then
       peer_url="$LISTEN_PUBLIC_URL"
@@ -3664,6 +3865,82 @@ get_agent_json() {
   url="$1"
   token="$2"
   curl -fsS -H "X-TCP-Tune-Token: $token" "$url"
+}
+
+remote_defaults_available() {
+  peer="$1"
+  token="$2"
+  curl -fsS --max-time 3 -H "X-TCP-Tune-Token: $token" "$peer/defaults" 2>/dev/null | grep -q '"available": true'
+}
+
+defaults_menu_tag() {
+  peer="$1"
+  token="$2"
+  if initial_defaults_available; then
+    local_tag="本机已记录"
+  else
+    local_tag="本机未记录"
+  fi
+  if remote_defaults_available "$peer" "$token"; then
+    remote_tag="服务端已记录"
+  else
+    remote_tag="服务端未知"
+  fi
+  printf '[%s / %s]\n' "$local_tag" "$remote_tag"
+}
+
+restore_defaults_menu() {
+  peer="$1"
+  token="$2"
+  clear_screen
+  print_header "恢复默认值"
+  ui_subtitle "恢复客户端首次运行时记录的本机参数，并请求服务端恢复启动时快照。"
+  echo
+  ui_section "快照状态"
+  if initial_defaults_available; then
+    ui_row "本机快照" "已记录"
+  else
+    ui_row "本机快照" "未记录"
+  fi
+  if remote_defaults_available "$peer" "$token"; then
+    ui_row "服务端快照" "已记录"
+  else
+    ui_row "服务端快照" "未知或不可用"
+  fi
+  echo
+  ui_note "范围" "只恢复本工具首次运行记录的 TCP/sysctl 相关参数，不修改防火墙、DNS、代理或路由策略。"
+  ui_note "区别" "回滚最近修改只撤销最近一次写入；恢复默认值会回到首次连接时记录的基线。"
+  echo
+  if ! prompt_read "确认恢复默认值？输入 yes 继续，其他返回："; then
+    return 1
+  fi
+  [ "$PROMPT_REPLY" = "yes" ] || return 0
+
+  local_ok="0"
+  remote_ok="0"
+  if initial_defaults_available; then
+    if restore_initial_defaults; then
+      local_ok="1"
+    else
+      warn "本机默认值恢复失败。"
+    fi
+  else
+    warn "本机没有首次默认值快照，跳过本机恢复。"
+  fi
+
+  if post_json "$peer/restore-defaults" "$token" "{}" >/dev/null 2>&1; then
+    remote_ok="1"
+  else
+    warn "服务端默认值恢复请求失败。"
+  fi
+
+  if [ "$local_ok" = "1" ] || [ "$remote_ok" = "1" ]; then
+    post_client_stage "restore-defaults" "success" "本机:$local_ok 服务端:$remote_ok"
+    ui_note "结果" "恢复默认值流程已执行。本机=$local_ok，服务端=$remote_ok。"
+    return 0
+  fi
+  post_client_stage "restore-defaults" "failed" "没有可恢复快照"
+  return 1
 }
 
 render_agent_events_summary() {
@@ -4081,6 +4358,7 @@ join_mode() {
   TUNE_REPORT_PEER="$peer"
   TUNE_REPORT_TOKEN="$token"
   TUNE_CLIENT_IP="$client_lan_ip"
+  ensure_initial_defaults_if_root "client" || true
 
   report_role="join"
   [ "${CLIENT_MENU:-0}" = "1" ] && report_role="client"
@@ -4342,6 +4620,7 @@ client_menu() {
     echo
     ui_menu_group "退出"
     ui_menu_item "6" "回滚最近修改" "恢复最近一次参数写入" "$COLOR_YELLOW"
+    ui_menu_item "9" "恢复默认值" "$(defaults_menu_tag "$peer" "$token")" "$COLOR_YELLOW"
     ui_menu_item "7" "停止会话并退出" "清理 Agent / iperf3" "$COLOR_YELLOW"
     ui_menu_item "q" "退出客户端" "不停止服务端会话" "$COLOR_DIM"
     echo
@@ -4370,6 +4649,7 @@ client_menu() {
         ;;
       7) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
       8) run_iperf3_speedtest "$host" "$iperf_port"; pause_for_enter ;;
+      9) restore_defaults_menu "$peer" "$token"; pause_for_enter ;;
       q|Q) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac
@@ -4600,6 +4880,17 @@ main() {
       fi
       ;;
     rollback) rollback_last ;;
+    defaults-status)
+      if initial_defaults_available; then
+        echo "默认值快照：已记录 ($(cat "$(initial_defaults_path_file)" 2>/dev/null || initial_defaults_dir))"
+        exit 0
+      fi
+      echo "默认值快照：未记录"
+      exit 1
+      ;;
+    restore-defaults)
+      restore_initial_defaults
+      ;;
     # 中文 AI 命令是面向普通用户的主入口；英文命令保留给旧文档和自动化脚本。
     AI测速|ai-benchmark-models)
       ai_benchmark_models

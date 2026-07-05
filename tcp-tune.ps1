@@ -298,6 +298,22 @@ function Invoke-AgentGet {
   Invoke-RestMethod -Method Get -Uri $Url -Headers @{ "X-TCP-Tune-Token" = $TokenValue }
 }
 
+function Test-RemoteDefaultsAvailable {
+  param([string]$PeerUrl, [string]$TokenValue)
+  try {
+    $data = Invoke-AgentGet -Url "$PeerUrl/defaults" -TokenValue $TokenValue
+    return [bool]$data.available
+  } catch {
+    return $false
+  }
+}
+
+function Get-DefaultsMenuTag {
+  param([string]$PeerUrl, [string]$TokenValue)
+  $remote = if (Test-RemoteDefaultsAvailable -PeerUrl $PeerUrl -TokenValue $TokenValue) { "服务端已记录" } else { "服务端未知" }
+  return "[本机不适用 / $remote]"
+}
+
 function Get-PeerHost {
   param([string]$Url)
   return ([Uri]$Url).Host
@@ -664,6 +680,36 @@ function Show-AgentEventSummary {
   Write-Host "  暂无过程记录。" -ForegroundColor DarkGray
 }
 
+function Invoke-RestoreDefaultsMenu {
+  param([string]$PeerUrl, [string]$TokenValue)
+  Write-Header "恢复默认值"
+  Write-Subtitle "Windows 端不自动写入本机 TCP 栈，只请求服务端恢复启动时快照。"
+  Write-Host ""
+  Write-Section "快照状态"
+  Write-PanelRow "本机快照" "不适用"
+  if (Test-RemoteDefaultsAvailable -PeerUrl $PeerUrl -TokenValue $TokenValue) {
+    Write-PanelRow "服务端快照" "已记录"
+  } else {
+    Write-PanelRow "服务端快照" "未知或不可用"
+  }
+  Write-Host ""
+  Write-Note "范围" "只恢复服务端首次记录的 TCP/sysctl 快照，不提交任意参数。"
+  $answer = Read-Host "确认请求服务端恢复默认值？输入 yes 继续，其他返回"
+  if ($answer -ne "yes") { return $false }
+  try {
+    $result = Invoke-AgentPost -Url "$PeerUrl/restore-defaults" -TokenValue $TokenValue -Body ([pscustomobject]@{})
+    if ($result.ok) {
+      Write-Host "服务端默认值恢复请求已执行。" -ForegroundColor Green
+      return $true
+    }
+    Write-Host "服务端返回恢复失败。" -ForegroundColor Yellow
+    return $false
+  } catch {
+    Write-Host "服务端默认值恢复请求失败：$($_.Exception.Message)" -ForegroundColor Yellow
+    return $false
+  }
+}
+
 function Show-ClientDashboard {
   param([string]$LocalAddress, [int]$Port)
   Write-Header "TCP 双端调优器 · 客户端"
@@ -864,6 +910,7 @@ function Invoke-ClientMenu {
     Write-Host ""
     Write-MenuGroup "退出"
     Write-MenuItem "6" "回滚最近修改" "Windows 端不自动写入，仅提示说明" "Yellow"
+    Write-MenuItem "9" "恢复默认值" (Get-DefaultsMenuTag -PeerUrl $PeerUrl -TokenValue $TokenValue) "Yellow"
     Write-MenuItem "7" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
     Write-MenuItem "q" "退出客户端" "不停止服务端会话" "DarkGray"
     $choice = Read-Host "请选择"
@@ -877,6 +924,7 @@ function Invoke-ClientMenu {
       "6" { Write-Host "Windows 端默认没有自动写入 TCP 参数，无需回滚。" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
       "7" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
       "8" { Invoke-Iperf3Speedtest -HostName $HostName -Port $Port; Read-Host "按回车返回主菜单" | Out-Null }
+      "9" { Invoke-RestoreDefaultsMenu -PeerUrl $PeerUrl -TokenValue $TokenValue | Out-Null; Read-Host "按回车返回主菜单" | Out-Null }
       "q" { return }
       "Q" { return }
       default { Write-Host "无效选择。" -ForegroundColor Yellow }

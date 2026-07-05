@@ -4,7 +4,7 @@ TCP-optimization 是一个双端 TCP 调优脚本，用来在 VPS 和客户端�
 
 它的目标很简单：
 
-- 服务端只负责监听、测速和展示状态。
+- 服务端默认只负责监听、测速和展示状态；“恢复默认值”只会恢复服务端启动时记录的首次快照。
 - 客户端负责本机优化，例如 OpenWrt、Linux、macOS、Windows。
 - 服务端需要 Python3；OpenWrt 客户端不强制安装 Python，AI 功能可通过 curl 调用公共 AI 网关。
 - 所有修改都有备份，退出时会清理临时 Agent 和 iperf3。
@@ -32,7 +32,7 @@ TCP-optimization 是一个双端 TCP 调优脚本，用来在 VPS 和客户端�
 - AI 智能调参：AI 只返回结构化建议，脚本按白名单和数值边界执行。
 - OpenWrt 轻量支持：OpenWrt 端不要求 python3。
 - 安全清理：Ctrl+C 或菜单停止会清理本工具创建的 Agent/iperf3。
-- 回滚备份：每次写入参数前都会保存备份。
+- 回滚备份：每次写入参数前都会保存备份，客户端首次运行会记录本机与服务端的默认快照。
 
 ## 快速开始
 
@@ -76,6 +76,7 @@ Windows 无 winget/choco/scoop 时，脚本会把 iperf3 下载到用户缓存�
 [5] 查看过程记录      中文摘要日志
 [8] iperf3 速度测试   简单测速，不修改参数
 [6] 回滚最近修改      恢复最近一次参数写入
+[9] 恢复默认值        显示本机 / 服务端首次快照状态
 [7] 停止会话并退出    清理 Agent / iperf3
 [q] 退出客户端        不停止服务端会话
 ```
@@ -165,11 +166,14 @@ sudo sh tcp-tune.sh rollback
 
 `rollback` 会同时查找普通参数写入备份和 AI / 手动适配产生的 `manual-*` 备份，并尽量恢复写入前的运行时 sysctl 值。
 
+客户端菜单里的“恢复默认值”用于回到首次运行记录的双端快照：客户端恢复本机首次快照，同时通过带 token 的固定 Agent 端点请求服务端恢复启动时快照。它只处理本工具管理的 TCP/sysctl 参数，不修改防火墙、DNS、代理或路由策略。
+
 备份目录通常在：
 
 ```text
 /var/lib/tcp-tune/backups
 /var/lib/tcp-tune/manual-*
+/var/lib/tcp-tune/initial-defaults
 ```
 
 ## 清理
