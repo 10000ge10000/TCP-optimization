@@ -5,6 +5,7 @@
 - Omnitt 可借鉴的是成熟同类方案的计算模型：本地带宽、服务端带宽、RTT、内存、拥塞控制、队列算法、爬升倾向共同决定参数。落地到本项目时，BDP 只作为起点，不能照抄其静态 sysctl 输出。
 - NodeSeek / BlackSheep 脚本可借鉴的是实操经验：先确认 BBR/qdisc 基线，再用单线程 iperf3 看真实链路；高重传时优先收缩缓冲和发送队列；吞吐稳定时再小步提高。
 - NodeSeek / BlackSheep 脚本中不适合直接继承的做法包括：默认直接覆盖 `/etc/sysctl.conf`、默认写 TC/CAKE/HTB 限速、无复测即保留参数、用宽泛 `pkill iperf3` 停止进程。
+- iBytebox AI Agent VPS TCP tuning 方案可借鉴的是证据模型：VPS 角色、关键业务方向、协议类型、PMTU、qdisc drop/backlog、P1 单流和 P4 多流差异、回滚报告共同参与判断。不得把它理解成默认自动改 MTU、TBF/HTB 或部署 qos-agent。
 - TC、CAKE 或显式限速能压低重传，但会改变链路容量表现。本项目只把它作为明确功能或建议，不在默认自动优化里偷偷启用。
 - 所有外部资料只能转化为本项目可验证规则，不能照搬固定参数、站点名称、商家名称、地区缩写或用户原始预设名。
 
@@ -12,7 +13,9 @@
 
 - 先测速，再调参。任何自动优化都必须用 iperf3 的真实上传、下载、重传和首秒速度作为输入，不能只按预设写参数。
 - 默认单线程测试。多线程只能作为容量探测或人工排障选项，不作为默认调参依据。
+- P4 多流测试、PMTU 探测和 qdisc drop/backlog delta 只属于高级诊断或 AI 上下文证据；默认稳定自动优化不能因为这些诊断项而偷偷扩大干预范围。
 - 调参前必须采集这些输入：RTT、单线程 iperf3 上传/下载速率、上传/下载重传、首秒速度、内存、当前拥塞控制、当前 qdisc、当前 `rmem/wmem`、当前 `tcp_notsent_lowat`、当前 `tcp_limit_output_bytes`。
+- AI 调参和高级诊断可以额外采集：`machine_role`、`critical_direction`、`protocol_class`、PMTU、出口接口 MTU、qdisc drop/backlog delta、P1/P4 对比。`proxy_software` 和 `traffic_path` 只进入报告和 AI 上下文，不参与 shell 命令拼接。
 - BDP 只能作为初始估算。有效带宽优先取真实 iperf3 测速值；如果用户输入带宽与实测差异明显，自动逻辑必须以实测为准，并在提示中说明链路可能受限。
 - 缓冲区不能照搬超大值，必须受内存、RTT、重传、目标模式和复测结果约束。低内存设备必须主动下调推荐挡位。
 - 服务端模式默认保持只读监控；唯一例外是带 token 的 `restore-defaults` 固定端点只能恢复服务端首次启动时记录的 TCP/sysctl 快照，不能接受任意参数写入。
@@ -28,6 +31,8 @@
 - `tcp_notsent_lowat` 与 `tcp_limit_output_bytes` 是控制发送排队的核心旋钮，必须随目标模式收敛，不能只放大 `rmem/wmem`。
 - 拥塞控制和 qdisc 是基础项，不是万能修复。可用时优先 BBR + `fq`；OpenWrt 已有 `cake/fq_codel/fq` 时优先尊重现有队列能力。
 - 如果高重传来自链路质量、运营商限速、跨境抖动或晚高峰拥塞，脚本只能给出可验证建议，不应继续堆大缓冲制造伪优化。
+- 如果重传高但 qdisc drop/backlog delta 为 0，应提示更可能是路径、对端或上游拥塞，不能继续盲目放大 buffer。
+- 如果 `protocol_class=udp-quic`，TCP buffer 调整只能作为间接建议；默认不写 TCP sysctl，应优先做 PMTU/qdisc/CPU 诊断。
 
 ## 预制参数规则
 
@@ -55,6 +60,8 @@
   - 吞吐优先：允许较大队列，但必须受上限约束。
   - 快速起速：保持小队列，避免为了峰值速度放大排队。
 - TC/CAKE 限速属于强干预。只能作为显式功能或建议，不作为默认自动动作。
+- MTU、TBF/HTB、qos-agent、策略路由和多 peer 并发测试都属于强干预或复杂诊断，不得作为默认自动优化动作。
+- 成功保留调参结果后，应写入 `/var/lib/tcp-tune/profiles/latest.md`，记录角色、方向、协议、P1/P4、PMTU、qdisc delta、写入参数、备份路径和保留原因；不得写入 token、密码、SSH 私钥或 Cookie。
 - 不得默认直接覆盖 `/etc/sysctl.conf`。项目写入必须使用本项目管理的 sysctl 文件，并保留备份与回滚路径。
 - 不得自动修改防火墙、WAN、DNS、DHCP、代理服务、路由策略、forwarding 或用户已有长期 iperf3 服务。
 

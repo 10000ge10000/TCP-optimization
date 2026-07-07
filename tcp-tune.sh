@@ -327,6 +327,81 @@ initial_defaults_path_file() {
   printf '%s\n' "$STATE_DIR/initial-defaults.path"
 }
 
+profiles_dir() {
+  printf '%s\n' "$STATE_DIR/profiles"
+}
+
+latest_profile_path() {
+  printf '%s\n' "$STATE_DIR/profiles/latest.md"
+}
+
+safe_report_text() {
+  printf '%s' "${1:-}" | tr '\r\n\t,:"'"'"'' '        ' | cut -c 1-160
+}
+
+mask_report_peer() {
+  value="${1:-}"
+  [ -n "$value" ] || { echo ""; return 0; }
+  case "$value" in
+    http://\[*\]*|https://\[*\]*)
+      inner="$(printf '%s' "$value" | sed 's#^[^[]*\[\([^]]*\)\].*#\1#')"
+      first="${inner%%:*}"
+      last="${inner##*:}"
+      printf '%s\n' "$(safe_report_text "$first:...:$last")"
+      return 0
+      ;;
+    *:*)
+      first="${value%%:*}"
+      last="${value##*:}"
+      if [ -n "$first" ] && [ -n "$last" ] && [ "$first" != "$value" ]; then
+        printf '%s\n' "$(safe_report_text "$first:...:$last")"
+        return 0
+      fi
+      ;;
+    *.*.*.*)
+      masked="$(printf '%s\n' "$value" | awk -F. 'NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {print $1 "." $2 ".x.x"; found=1} END {if (!found) print ""}')"
+      if [ -n "$masked" ]; then
+        printf '%s\n' "$(safe_report_text "$masked")"
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' "$(safe_report_text "$value")"
+}
+
+validate_machine_role() {
+  case "${1:-endpoint}" in
+    relay|landing|mixed|endpoint) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_critical_direction() {
+  case "${1:-download}" in
+    download|upload|both) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_protocol_class() {
+  case "${1:-unknown}" in
+    tcp|udp-quic|mixed|unknown) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_link_context() {
+  machine_role="${1:-endpoint}"
+  critical_direction="${2:-download}"
+  protocol_class="${3:-unknown}"
+  proxy_software="$(safe_report_text "${4:-}")"
+  traffic_path="$(safe_report_text "${5:-}")"
+  validate_machine_role "$machine_role" || die "--machine-role 只支持 relay、landing、mixed、endpoint。"
+  validate_critical_direction "$critical_direction" || die "--critical-direction 只支持 download、upload、both。"
+  validate_protocol_class "$protocol_class" || die "--protocol-class 只支持 tcp、udp-quic、mixed、unknown。"
+  printf "%s\t%s\t%s\t%s\t%s\n" "$machine_role" "$critical_direction" "$protocol_class" "$proxy_software" "$traffic_path"
+}
+
 detect_os() {
   OS_ID="unknown"
   OS_NAME="Unknown"
@@ -2433,6 +2508,11 @@ ai_auto_mode() {
   rounds="$TCP_TUNE_AI_MAX_ROUNDS"
   role="auto"
   seconds="12"
+  machine_role="endpoint"
+  critical_direction="download"
+  protocol_class="unknown"
+  proxy_software=""
+  traffic_path=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --peer|--host) require_option_value "$1" "${2:-}"; host="$2"; shift 2 ;;
@@ -2441,6 +2521,11 @@ ai_auto_mode() {
       --rounds) require_option_value "$1" "${2:-}"; rounds="$2"; shift 2 ;;
       --role) require_option_value "$1" "${2:-}"; role="$2"; shift 2 ;;
       --seconds) require_option_value "$1" "${2:-}"; seconds="$2"; shift 2 ;;
+      --machine-role) require_option_value "$1" "${2:-}"; machine_role="$2"; shift 2 ;;
+      --critical-direction) require_option_value "$1" "${2:-}"; critical_direction="$2"; shift 2 ;;
+      --protocol-class) require_option_value "$1" "${2:-}"; protocol_class="$2"; shift 2 ;;
+      --proxy-software) require_option_value "$1" "${2:-}"; proxy_software="$2"; shift 2 ;;
+      --traffic-path) require_option_value "$1" "${2:-}"; traffic_path="$2"; shift 2 ;;
       *) die "未知 AI自动优化 参数：$1" ;;
     esac
   done
@@ -2453,6 +2538,12 @@ ai_auto_mode() {
     throughput) target_retr="10" ;;
     startup) target_retr="5" ;;
   esac
+  context_line="$(normalize_link_context "$machine_role" "$critical_direction" "$protocol_class" "$proxy_software" "$traffic_path")"
+  machine_role="$(printf '%s\n' "$context_line" | cut -f1)"
+  critical_direction="$(printf '%s\n' "$context_line" | cut -f2)"
+  protocol_class="$(printf '%s\n' "$context_line" | cut -f3)"
+  proxy_software="$(printf '%s\n' "$context_line" | cut -f4)"
+  traffic_path="$(printf '%s\n' "$context_line" | cut -f5)"
   validate_port_value "$port" || die "--port 必须在 1 和 65535 之间。"
   validate_positive_int_range "$rounds" 1 "$TCP_TUNE_AI_MAX_ROUNDS" || die "--rounds 必须在 1 和 $TCP_TUNE_AI_MAX_ROUNDS 之间。"
   validate_positive_int_range "$seconds" 5 60 || die "--seconds 必须在 5 和 60 之间。"
@@ -2470,6 +2561,9 @@ ai_auto_mode() {
   clear_screen
   print_header "AI 自动调参"
   ui_row "角色" "$role"
+  ui_row "业务角色" "$machine_role"
+  ui_row "关键方向" "$critical_direction"
+  ui_row "协议类型" "$protocol_class"
   ui_row "对端" "$host"
   ui_row "目标" "$objective"
   ui_row "轮数" "$rounds"
@@ -2487,15 +2581,30 @@ ai_auto_mode() {
   round=1
   previous_summary=""
   ai_rolled_back="0"
+  ai_write_skipped="0"
   while [ "$round" -le "$rounds" ]; do
     echo
     ui_section "第 $round/$rounds 轮基线"
     summary="$(ai_measure_pair "$host" "$port" "$seconds")"
+    if [ "$round" = "1" ]; then
+      iface="$(route_iface_for_host "$host")"
+      pmtu="$(probe_pmtu "$host")"
+      qdisc_before="$(qdisc_stats "$iface")"
+      ui_note "链路证据" "iface=$iface pmtu=$pmtu qdisc=$(printf '%s' "$qdisc_before")"
+      if [ "$protocol_class" = "udp-quic" ]; then
+        ui_note "协议提醒" "UDP/QUIC 场景下 TCP 调参只作为间接建议，重点看 PMTU/qdisc/CPU。"
+      fi
+    fi
+    summary_for_ai="$(printf '%s' "$summary" | sed 's/}$//')"
+    proxy_software_json="$(printf '%s' "$proxy_software" | json_escape_string)"
+    traffic_path_json="$(printf '%s' "$traffic_path" | json_escape_string)"
+    qdisc_before_json="$(safe_report_text "${qdisc_before:-unknown unknown}" | json_escape_string)"
+    summary_for_ai="$summary_for_ai,\"machine_role\":\"$machine_role\",\"critical_direction\":\"$critical_direction\",\"protocol_class\":\"$protocol_class\",\"proxy_software\":\"$proxy_software_json\",\"traffic_path\":\"$traffic_path_json\",\"pmtu\":\"${pmtu:-unknown}\",\"qdisc_before\":\"$qdisc_before_json\"}"
     print_ai_summary_metrics "测速摘要" "$summary"
     if [ "$model" = "内置保守策略" ]; then
       decision="$(ai_fallback_decision_json "$objective" "$role")"
       ui_note "AI 状态" "未连接到 AI 网关，本轮使用内置保守策略。"
-    elif decision="$(ai_decision_for_summary "$summary" "$objective" "$role" "$model" 2>/dev/null)"; then
+    elif decision="$(ai_decision_for_summary "$summary_for_ai" "$objective" "$role" "$model" 2>/dev/null)"; then
       :
     else
       decision="$(ai_fallback_decision_json "$objective" "$role")"
@@ -2507,6 +2616,11 @@ ai_auto_mode() {
     }
     normalized_decision="$(objective_clamp_ai_decision "$role" "$objective" "$normalized_decision")"
     print_ai_decision_summary "$role" "$objective" "$normalized_decision"
+    if [ "$protocol_class" = "udp-quic" ]; then
+      ui_note "写入策略" "当前协议类型为 UDP/QUIC，本轮只输出建议，不写 TCP sysctl。"
+      ai_write_skipped="1"
+      break
+    fi
     previous_summary="$summary"
     previous_backup="$LAST_MANUAL_BACKUP"
     apply_ai_decision "$role" "$normalized_decision"
@@ -2539,7 +2653,23 @@ ai_auto_mode() {
   ui_section "完成"
   ui_row "最终角色" "$role"
   ui_row "模型" "$model"
-  [ "$ai_rolled_back" = "1" ] || post_client_stage "ai" "success" "$(objective_label "$objective")"
+  if [ "$ai_write_skipped" = "1" ]; then
+    post_client_stage "ai" "ok" "UDP/QUIC 仅诊断"
+    report_path="$(write_tuning_profile "AI $(objective_label "$objective") 建议" "$machine_role" "$critical_direction" "$protocol_class" "$host" "$objective summary" "not-run" "${pmtu:-unknown}" "drop=unknown backlog=unknown" "no-write protocol-class=udp-quic" "" "UDP/QUIC 场景未写 TCP sysctl，仅输出诊断建议。")"
+    ui_note "报告" "$report_path"
+  elif [ "$ai_rolled_back" = "1" ]; then
+    :
+  else
+    post_client_stage "ai" "success" "$(objective_label "$objective")"
+    qdisc_after="$(qdisc_stats "${iface:-unknown}")"
+    qdisc_delta_values="$(qdisc_delta "${qdisc_before:-unknown unknown}" "$qdisc_after")"
+    # shellcheck disable=SC2086
+    set -- $qdisc_delta_values
+    drop_delta="${1:-unknown}"
+    backlog_delta="${2:-unknown}"
+    report_path="$(write_tuning_profile "AI $(objective_label "$objective")" "$machine_role" "$critical_direction" "$protocol_class" "$host" "$objective summary" "not-run" "${pmtu:-unknown}" "drop=$drop_delta backlog=$backlog_delta" "AI role=$role model=$model" "$LAST_MANUAL_BACKUP" "AI 调整通过目标复测。")"
+    ui_note "报告" "$report_path"
+  fi
   ui_note "回滚" "如需撤销最近保留的手动适配，可使用备份目录中的 before 文件恢复。"
 }
 
@@ -2628,6 +2758,257 @@ detect_rtt_ms() {
   avg="$(printf '%s\n' "$output" | awk -F'=' '/rtt|round-trip/ { split($2,a,"/"); printf "%d\n", a[2] + 0; found=1 } END { if (!found) print 0 }' | tail -n 1)"
   is_unsigned_integer "$avg" || avg=0
   echo "$avg"
+}
+
+route_iface_for_host() {
+  host="$1"
+  have_cmd ip || { echo unknown; return 0; }
+  ip route get "$host" 2>/dev/null | awk '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "dev" && (i + 1) <= NF) {
+        print $(i + 1)
+        exit
+      }
+    }
+  }' | awk 'NF {print; found=1; exit} END {if (!found) print "unknown"}'
+}
+
+iface_mtu() {
+  iface="$1"
+  [ -n "$iface" ] && [ "$iface" != "unknown" ] || { echo unknown; return 0; }
+  if [ -r "/sys/class/net/$iface/mtu" ]; then
+    cat "/sys/class/net/$iface/mtu" 2>/dev/null || echo unknown
+  else
+    echo unknown
+  fi
+}
+
+qdisc_stats() {
+  iface="$1"
+  [ -n "$iface" ] && [ "$iface" != "unknown" ] || { echo "unknown unknown"; return 0; }
+  have_cmd tc || { echo "unknown unknown"; return 0; }
+  tc -s qdisc show dev "$iface" 2>/dev/null | awk '
+    BEGIN { drops = 0; backlog = 0; seen = 0 }
+    {
+      for (i = 1; i <= NF; i++) {
+        token = $i
+        gsub(/[(),]/, "", token)
+        if (token == "dropped" && (i + 1) <= NF) {
+          value = $(i + 1)
+          gsub(/[^0-9]/, "", value)
+          if (value != "") { drops += value + 0; seen = 1 }
+        }
+        if (token == "backlog" && (i + 2) <= NF) {
+          value = $(i + 2)
+          gsub(/[^0-9]/, "", value)
+          if (value != "") { backlog += value + 0; seen = 1 }
+        }
+      }
+    }
+    END {
+      if (seen) printf "%d %d\n", drops, backlog
+      else print "unknown unknown"
+    }
+  '
+}
+
+qdisc_delta() {
+  before="$1"
+  after="$2"
+  # shellcheck disable=SC2086
+  set -- $before
+  before_drop="${1:-unknown}"
+  before_backlog="${2:-unknown}"
+  # shellcheck disable=SC2086
+  set -- $after
+  after_drop="${1:-unknown}"
+  after_backlog="${2:-unknown}"
+  if is_unsigned_integer "$before_drop" && is_unsigned_integer "$after_drop"; then
+    drop_delta=$((after_drop - before_drop))
+    [ "$drop_delta" -lt 0 ] && drop_delta=0
+  else
+    drop_delta="unknown"
+  fi
+  if is_unsigned_integer "$before_backlog" && is_unsigned_integer "$after_backlog"; then
+    backlog_delta=$((after_backlog - before_backlog))
+    [ "$backlog_delta" -lt 0 ] && backlog_delta=0
+  else
+    backlog_delta="unknown"
+  fi
+  printf "%s %s\n" "$drop_delta" "$backlog_delta"
+}
+
+probe_pmtu() {
+  host="$1"
+  if have_cmd tracepath; then
+    pmtu="$(tracepath -n -m 8 "$host" 2>/dev/null | awk '/pmtu/ {for (i=1;i<=NF;i++) if ($i=="pmtu" && (i+1)<=NF) print $(i+1)}' | tail -n 1)"
+    if is_unsigned_integer "$pmtu"; then
+      echo "$pmtu"
+      return 0
+    fi
+  fi
+  case "$host" in
+    *:*) echo unknown; return 0 ;;
+  esac
+  have_cmd ping || { echo unknown; return 0; }
+  for payload in 1472 1464 1452 1412 1372 1332 1292 1252 1212 1172; do
+    if ping -c 1 -W 1 -M do -s "$payload" "$host" >/dev/null 2>&1; then
+      echo $((payload + 28))
+      return 0
+    fi
+  done
+  echo unknown
+}
+
+measure_iperf_pair() {
+  host="$1"
+  port="$2"
+  seconds="${3:-8}"
+  parallel="${4:-1}"
+  bind_ip="${5:-}"
+  upload_json="$(run_iperf_client "$host" "$port" 0 "$seconds" "$bind_ip" "$parallel" 2>/dev/null || true)"
+  download_json="$(run_iperf_client "$host" "$port" 1 "$seconds" "$bind_ip" "$parallel" 2>/dev/null || true)"
+  if ! printf '%s' "$upload_json" | grep -q '"end"'; then
+    echo "ERR upload"
+    return 1
+  fi
+  if ! printf '%s' "$download_json" | grep -q '"end"'; then
+    echo "ERR download"
+    return 1
+  fi
+  upload_bps="$(printf '%s\n' "$upload_json" | extract_bps)"
+  upload_retr="$(printf '%s\n' "$upload_json" | extract_retransmits)"
+  upload_first="$(printf '%s\n' "$upload_json" | extract_first_interval_bps)"
+  download_bps="$(printf '%s\n' "$download_json" | extract_bps)"
+  download_retr="$(printf '%s\n' "$download_json" | extract_retransmits)"
+  download_first="$(printf '%s\n' "$download_json" | extract_first_interval_bps)"
+  printf "%s %s %s %s %s %s\n" "${upload_bps:-0}" "${upload_retr:-0}" "${upload_first:-0}" "${download_bps:-0}" "${download_retr:-0}" "${download_first:-0}"
+}
+
+print_iperf_pair_rows() {
+  label="$1"
+  values="$2"
+  # shellcheck disable=SC2086
+  set -- $values
+  ui_row "$label 上传" "$(format_rate "${1:-0}") / 重传 $(format_count "${2:-0}") 次 / 首秒 $(format_rate "${3:-0}")"
+  ui_row "$label 下载" "$(format_rate "${4:-0}") / 重传 $(format_count "${5:-0}") 次 / 首秒 $(format_rate "${6:-0}")"
+}
+
+write_tuning_profile() {
+  title="$1"
+  machine_role="$2"
+  critical_direction="$3"
+  protocol_class="$4"
+  peer_label="$5"
+  p1_result="$6"
+  p4_result="$7"
+  pmtu="$8"
+  qdisc_delta_text="$9"
+  params_text="${10:-}"
+  backup_path="${11:-}"
+  decision_text="${12:-}"
+  ensure_state_dir
+  mkdir -p "$(profiles_dir)"
+  path="$(latest_profile_path)"
+  {
+    printf '# TCP-optimization 调参报告\n\n'
+    printf -- '- 时间：%s\n' "$(date -Iseconds 2>/dev/null || date)"
+    printf -- '- 标题：%s\n' "$(safe_report_text "$title")"
+    printf -- '- 机器角色：%s\n' "$machine_role"
+    printf -- '- 关键方向：%s\n' "$critical_direction"
+    printf -- '- 协议类型：%s\n' "$protocol_class"
+    printf -- '- 测试对端：%s\n' "$(mask_report_peer "$peer_label")"
+    printf -- '- P1 结果：%s\n' "$(safe_report_text "$p1_result")"
+    printf -- '- P4 结果：%s\n' "$(safe_report_text "$p4_result")"
+    printf -- '- PMTU：%s\n' "$pmtu"
+    printf -- '- qdisc delta：%s\n' "$(safe_report_text "$qdisc_delta_text")"
+    printf -- '- 写入参数：%s\n' "$(safe_report_text "$params_text")"
+    printf -- '- 备份路径：%s\n' "$(safe_report_text "$backup_path")"
+    printf -- '- 保留原因：%s\n' "$(safe_report_text "$decision_text")"
+    printf '\n> 本报告不保存 token、密码、SSH 私钥或 Cookie。\n'
+  } > "$path"
+  printf '%s\n' "$path"
+}
+
+advanced_diagnose_mode() {
+  host=""
+  port="$IPERF_PORT"
+  seconds="8"
+  machine_role="endpoint"
+  critical_direction="download"
+  protocol_class="unknown"
+  proxy_software=""
+  traffic_path=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --peer|--host) require_option_value "$1" "${2:-}"; host="$2"; shift 2 ;;
+      --port|--iperf-port) require_option_value "$1" "${2:-}"; port="$2"; shift 2 ;;
+      --seconds) require_option_value "$1" "${2:-}"; seconds="$2"; shift 2 ;;
+      --machine-role) require_option_value "$1" "${2:-}"; machine_role="$2"; shift 2 ;;
+      --critical-direction) require_option_value "$1" "${2:-}"; critical_direction="$2"; shift 2 ;;
+      --protocol-class) require_option_value "$1" "${2:-}"; protocol_class="$2"; shift 2 ;;
+      --proxy-software) require_option_value "$1" "${2:-}"; proxy_software="$2"; shift 2 ;;
+      --traffic-path) require_option_value "$1" "${2:-}"; traffic_path="$2"; shift 2 ;;
+      *) die "未知 advanced-diagnose 参数：$1" ;;
+    esac
+  done
+  [ -n "$host" ] || die "advanced-diagnose 需要 --host"
+  validate_port_value "$port" || die "--port 必须在 1 和 65535 之间。"
+  validate_positive_int_range "$seconds" 3 60 || die "--seconds 必须在 3 和 60 之间。"
+  context_line="$(normalize_link_context "$machine_role" "$critical_direction" "$protocol_class" "$proxy_software" "$traffic_path")"
+  machine_role="$(printf '%s\n' "$context_line" | cut -f1)"
+  critical_direction="$(printf '%s\n' "$context_line" | cut -f2)"
+  protocol_class="$(printf '%s\n' "$context_line" | cut -f3)"
+  proxy_software="$(printf '%s\n' "$context_line" | cut -f4)"
+  traffic_path="$(printf '%s\n' "$context_line" | cut -f5)"
+  detect_os
+  iface="$(route_iface_for_host "$host")"
+  mtu="$(iface_mtu "$iface")"
+  pmtu="$(probe_pmtu "$host")"
+  rtt_ms="$(detect_rtt_ms "$host")"
+  clear_screen
+  print_header "高级链路诊断"
+  ui_section "上下文"
+  ui_row "机器角色" "$machine_role"
+  ui_row "关键方向" "$critical_direction"
+  ui_row "协议类型" "$protocol_class"
+  [ -n "$proxy_software" ] && ui_row "代理软件" "$proxy_software"
+  [ -n "$traffic_path" ] && ui_row "业务路径" "$traffic_path"
+  ui_row "出口接口" "$iface"
+  ui_row "接口 MTU" "$mtu"
+  ui_row "PMTU" "$pmtu"
+  ui_row "RTT" "${rtt_ms}ms"
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    ui_note "Dry Run" "只展示会采集的诊断项，不运行 iperf3，不写入系统。"
+    return 0
+  fi
+  ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法进行高级诊断。"
+  bind_ip="$(local_lan_ipv4 || true)"
+  case "$host" in *:*) bind_ip="" ;; esac
+  qdisc_before="$(qdisc_stats "$iface")"
+  ui_section "P1 单流测试"
+  p1_result="$(measure_iperf_pair "$host" "$port" "$seconds" 1 "$bind_ip")"
+  print_iperf_pair_rows "P1" "$p1_result"
+  ui_section "P4 多流容量探测"
+  p4_result="$(measure_iperf_pair "$host" "$port" "$seconds" 4 "$bind_ip")"
+  print_iperf_pair_rows "P4" "$p4_result"
+  qdisc_after="$(qdisc_stats "$iface")"
+  qdisc_delta_values="$(qdisc_delta "$qdisc_before" "$qdisc_after")"
+  # shellcheck disable=SC2086
+  set -- $qdisc_delta_values
+  drop_delta="${1:-unknown}"
+  backlog_delta="${2:-unknown}"
+  ui_section "qdisc 测试窗口"
+  ui_row "drop delta" "$drop_delta"
+  ui_row "backlog delta" "$backlog_delta"
+  ui_section "判断"
+  if [ "$protocol_class" = "udp-quic" ]; then
+    ui_note "协议" "UDP/QUIC 场景不应把 TCP iperf3 结论直接当成最终调参依据。"
+  fi
+  if [ "$drop_delta" = "0" ] && [ "$backlog_delta" = "0" ]; then
+    ui_note "队列" "重传若仍偏高，更可能来自路径、对端或上游拥塞，不建议盲目堆大 buffer。"
+  fi
+  ui_note "强干预" "MTU、TBF/HTB、qos-agent 只给建议，不在本诊断中写入。"
 }
 
 recommend_preset_name() {
@@ -2867,10 +3248,12 @@ run_iperf_client() {
   reverse="$3"
   seconds="$4"
   bind_ip="${5:-}"
+  parallel="${6:-1}"
   [ -n "$host" ] || die "iperf3 需要 host"
   validate_port_value "$port" || die "iperf3 port 必须在 1 和 65535 之间。"
   case "$reverse" in 0|1) ;; *) die "iperf3 reverse 必须是 0 或 1。" ;; esac
   validate_positive_int_range "$seconds" 1 86400 || die "iperf3 seconds 必须是正整数。"
+  validate_positive_int_range "$parallel" 1 64 || die "iperf3 parallel 必须是 1 到 64 的正整数。"
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法测试。"
   # host 是 IPv6 地址（含冒号）时不能用 IPv4 源地址绑定，否则 iperf3 报 Invalid argument
   case "$host" in
@@ -2878,18 +3261,26 @@ run_iperf_client() {
       bind_ip=""
       ;;
   esac
+  parallel_args=""
+  if [ "$parallel" -gt 1 ]; then
+    parallel_args="-P $parallel"
+  fi
   # -O 3: 3秒预热不纳入统计，减少连接建立阶段的波动
   if [ "$reverse" = "1" ]; then
     if [ -n "$bind_ip" ]; then
-      iperf3 -c "$host" -p "$port" -B "$bind_ip" -R -t "$seconds" -O 3 -J
+      # shellcheck disable=SC2086
+      iperf3 -c "$host" -p "$port" -B "$bind_ip" -R -t "$seconds" -O 3 $parallel_args -J
     else
-      iperf3 -c "$host" -p "$port" -R -t "$seconds" -O 3 -J
+      # shellcheck disable=SC2086
+      iperf3 -c "$host" -p "$port" -R -t "$seconds" -O 3 $parallel_args -J
     fi
   else
     if [ -n "$bind_ip" ]; then
-      iperf3 -c "$host" -p "$port" -B "$bind_ip" -t "$seconds" -O 3 -J
+      # shellcheck disable=SC2086
+      iperf3 -c "$host" -p "$port" -B "$bind_ip" -t "$seconds" -O 3 $parallel_args -J
     else
-      iperf3 -c "$host" -p "$port" -t "$seconds" -O 3 -J
+      # shellcheck disable=SC2086
+      iperf3 -c "$host" -p "$port" -t "$seconds" -O 3 $parallel_args -J
     fi
   fi
 }
@@ -3162,15 +3553,37 @@ auto_tune() {
   ramp_rate="0.79"
   aggressive="0"
   allow_same_public="0"
-  [ "$#" -ge 10 ] && eval "memory_mb_value=\${10:-}"
-  [ "$#" -ge 11 ] && eval "ramp_rate=\${11:-0.79}"
-  [ "$#" -ge 12 ] && eval "aggressive=\${12:-0}"
-  [ "$#" -ge 13 ] && eval "allow_same_public=\${13:-0}"
+  machine_role="endpoint"
+  critical_direction="download"
+  protocol_class="unknown"
+  proxy_software=""
+  traffic_path=""
+  if [ "$#" -ge 10 ]; then
+    shift 9
+    memory_mb_value="${1:-}"
+    [ "$#" -ge 2 ] && ramp_rate="${2:-0.79}"
+    [ "$#" -ge 3 ] && aggressive="${3:-0}"
+    [ "$#" -ge 4 ] && allow_same_public="${4:-0}"
+    [ "$#" -ge 5 ] && machine_role="${5:-endpoint}"
+    [ "$#" -ge 6 ] && critical_direction="${6:-download}"
+    [ "$#" -ge 7 ] && protocol_class="${7:-unknown}"
+    [ "$#" -ge 8 ] && proxy_software="${8:-}"
+    [ "$#" -ge 9 ] && traffic_path="${9:-}"
+  fi
 
   case "$objective" in
     retrans|throughput|startup) ;;
     *) die "--objective 只支持 retrans、throughput、startup" ;;
   esac
+  context_line="$(normalize_link_context "$machine_role" "$critical_direction" "$protocol_class" "$proxy_software" "$traffic_path")"
+  machine_role="$(printf '%s\n' "$context_line" | cut -f1)"
+  critical_direction="$(printf '%s\n' "$context_line" | cut -f2)"
+  protocol_class="$(printf '%s\n' "$context_line" | cut -f3)"
+  proxy_software="$(printf '%s\n' "$context_line" | cut -f4)"
+  traffic_path="$(printf '%s\n' "$context_line" | cut -f5)"
+  if [ "$protocol_class" = "udp-quic" ]; then
+    die "protocol-class=udp-quic 时不默认执行 TCP buffer 写入；请先运行 advanced-diagnose 获取 PMTU/qdisc/P1/P4 证据。"
+  fi
   need_root
   install_runtime_deps
   ensure_tcp_baseline
@@ -3185,6 +3598,10 @@ auto_tune() {
   case "$host" in
     127.*|localhost|"$bind_ip") bind_ip="" ;;
   esac
+  route_iface="$(route_iface_for_host "$host")"
+  route_mtu="$(iface_mtu "$route_iface")"
+  route_pmtu="$(probe_pmtu "$host")"
+  qdisc_before="$(qdisc_stats "$route_iface")"
   mode_name="$(objective_label "$objective")"
   transfer_name="$(direction_label "$reverse")"
   display_local_ip="${bind_ip:-$(local_lan_ipv4 || true)}"
@@ -3199,8 +3616,11 @@ auto_tune() {
   ui_section "优化概览"
   ui_row "模式" "$mode_name"
   ui_row "方向" "$transfer_name"
+  ui_row "机器角色" "$machine_role"
+  ui_row "协议类型" "$protocol_class"
   ui_row "本机地址" "$display_local_ip"
   ui_row "测速节点" "已连接的服务端"
+  ui_row "PMTU/接口" "$route_pmtu / $route_iface mtu=$route_mtu"
   ui_row "最大轮数" "$rounds"
   echo
   ui_note "说明" "测速使用本机局域网地址作为源地址，远端连接地址不会显示在界面中。"
@@ -3415,6 +3835,12 @@ auto_tune() {
       final_startup_bps="${first_startup_bps:-0}"
     fi
   fi
+  qdisc_after="$(qdisc_stats "$route_iface")"
+  qdisc_delta_values="$(qdisc_delta "$qdisc_before" "$qdisc_after")"
+  # shellcheck disable=SC2086
+  set -- $qdisc_delta_values
+  qdisc_drop_delta="${1:-unknown}"
+  qdisc_backlog_delta="${2:-unknown}"
   if [ "$rolled_back_regression" = "1" ]; then
     post_client_stage "auto" "rollback" "$mode_name"
   else
@@ -3468,6 +3894,10 @@ auto_tune() {
   fi
   echo
   ui_section "配置摘要"
+  ui_note "qdisc delta" "drop=$qdisc_drop_delta backlog=$qdisc_backlog_delta"
+  if [ "$final_retr" -gt "$target_retr" ] && [ "$qdisc_drop_delta" = "0" ] && [ "$qdisc_backlog_delta" = "0" ]; then
+    ui_note "诊断" "重传仍高但本机 qdisc 无 drop/backlog 增量，更可能是路径、对端或上游拥塞。"
+  fi
   if [ "$rolled_back_regression" = "1" ] && [ "$applied_change_count" -eq 0 ]; then
     ui_note "已回退" "最新调整表现退化，已恢复优化前配置。"
     ui_note "回滚" "没有保留本次参数修改。"
@@ -3477,6 +3907,9 @@ auto_tune() {
   elif [ "$applied_change_count" -gt 0 ]; then
     ui_note "已保存" "仅保留经过下一轮复测的参数调整。"
     ui_note "回滚" "已创建备份，可在客户端菜单或 rollback 命令中恢复。"
+    params_text="rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo unknown) wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo unknown) notsent=$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo unknown) limit=$(sysctl -n net.ipv4.tcp_limit_output_bytes 2>/dev/null || echo unknown)"
+    report_path="$(write_tuning_profile "$mode_name" "$machine_role" "$critical_direction" "$protocol_class" "$host" "$transfer_name $(format_rate "$final_bps") retr=$final_retr first=$(format_rate "$final_startup_bps")" "not-run" "$route_pmtu" "drop=$qdisc_drop_delta backlog=$qdisc_backlog_delta" "$params_text" "$auto_initial_backup" "目标指标通过复测，保留本轮参数。")"
+    ui_note "报告" "$report_path"
   else
     ui_note "未修改" "本次只完成基线测试，没有保存未经复测的参数。"
     ui_note "回滚" "本轮未创建新的参数修改。"
@@ -4538,6 +4971,60 @@ run_client_optimization() {
   auto_tune "$host" "$iperf_port" "$objective" "$target_retr" "$rounds" "$reverse" 0 0 100 "" 0.79 0 "$allow_same_public"
 }
 
+prompt_link_context() {
+  CONTEXT_MACHINE_ROLE="endpoint"
+  CONTEXT_CRITICAL_DIRECTION="download"
+  CONTEXT_PROTOCOL_CLASS="unknown"
+  CONTEXT_PROXY_SOFTWARE=""
+  CONTEXT_TRAFFIC_PATH=""
+  echo
+  ui_section "链路上下文"
+  ui_menu_item "1" "endpoint" "普通客户端/落地应用默认选择"
+  ui_menu_item "2" "relay" "中转机，重点看转发方向"
+  ui_menu_item "3" "landing" "落地机，重点看入站到用户"
+  ui_menu_item "4" "mixed" "同机多角色"
+  if ! prompt_read "机器角色 [1-4]，默认 1："; then return 1; fi
+  case "$PROMPT_REPLY" in
+    2) CONTEXT_MACHINE_ROLE="relay" ;;
+    3) CONTEXT_MACHINE_ROLE="landing" ;;
+    4) CONTEXT_MACHINE_ROLE="mixed" ;;
+    ""|1) CONTEXT_MACHINE_ROLE="endpoint" ;;
+    0|q|Q|b|B) return_to_menu; return 1 ;;
+    *) warn "无效机器角色，已使用 endpoint。" ;;
+  esac
+  echo
+  ui_menu_item "1" "download" "服务端 → 本机"
+  ui_menu_item "2" "upload" "本机 → 服务端"
+  ui_menu_item "3" "both" "双向都关键"
+  if ! prompt_read "关键方向 [1-3]，默认 1："; then return 1; fi
+  case "$PROMPT_REPLY" in
+    2) CONTEXT_CRITICAL_DIRECTION="upload" ;;
+    3) CONTEXT_CRITICAL_DIRECTION="both" ;;
+    ""|1) CONTEXT_CRITICAL_DIRECTION="download" ;;
+    0|q|Q|b|B) return_to_menu; return 1 ;;
+    *) warn "无效关键方向，已使用 download。" ;;
+  esac
+  echo
+  ui_menu_item "1" "tcp" "TCP 代理/转发"
+  ui_menu_item "2" "udp-quic" "HY2/TUIC/QUIC 等 UDP/QUIC"
+  ui_menu_item "3" "mixed" "TCP 与 UDP/QUIC 都有"
+  ui_menu_item "4" "unknown" "不确定"
+  if ! prompt_read "协议类型 [1-4]，默认 4："; then return 1; fi
+  case "$PROMPT_REPLY" in
+    1) CONTEXT_PROTOCOL_CLASS="tcp" ;;
+    2) CONTEXT_PROTOCOL_CLASS="udp-quic" ;;
+    3) CONTEXT_PROTOCOL_CLASS="mixed" ;;
+    ""|4) CONTEXT_PROTOCOL_CLASS="unknown" ;;
+    0|q|Q|b|B) return_to_menu; return 1 ;;
+    *) warn "无效协议类型，已使用 unknown。" ;;
+  esac
+  if ! prompt_read "代理/业务软件名称，可留空："; then return 1; fi
+  CONTEXT_PROXY_SOFTWARE="$(safe_report_text "$PROMPT_REPLY")"
+  if ! prompt_read "业务路径描述，可留空："; then return 1; fi
+  CONTEXT_TRAFFIC_PATH="$(safe_report_text "$PROMPT_REPLY")"
+  normalize_link_context "$CONTEXT_MACHINE_ROLE" "$CONTEXT_CRITICAL_DIRECTION" "$CONTEXT_PROTOCOL_CLASS" "$CONTEXT_PROXY_SOFTWARE" "$CONTEXT_TRAFFIC_PATH" >/dev/null
+}
+
 run_client_ai_optimization() {
   host="$1"
   iperf_port="$2"
@@ -4579,6 +5066,11 @@ run_client_ai_optimization() {
     rounds="2"
   }
 
+  prompt_link_context || {
+    [ "$MENU_RETURNED" = "1" ] && return 0
+    return 1
+  }
+
   echo
   ui_section "安全说明"
   ui_note "执行范围" "AI 只能返回结构化建议，脚本只执行内置白名单参数。"
@@ -4591,7 +5083,33 @@ run_client_ai_optimization() {
   esac
 
   # 这里复用命令行 AI 自动优化入口，避免面板和命令行维护两套调参逻辑。
-  ai_auto_mode --host "$host" --port "$iperf_port" --objective "$objective" --rounds "$rounds" --role auto
+  ai_auto_mode --host "$host" --port "$iperf_port" --objective "$objective" --rounds "$rounds" --role auto \
+    --machine-role "$CONTEXT_MACHINE_ROLE" --critical-direction "$CONTEXT_CRITICAL_DIRECTION" \
+    --protocol-class "$CONTEXT_PROTOCOL_CLASS" --proxy-software "$CONTEXT_PROXY_SOFTWARE" \
+    --traffic-path "$CONTEXT_TRAFFIC_PATH"
+}
+
+run_client_advanced_diagnosis() {
+  host="$1"
+  iperf_port="$2"
+  clear_screen
+  print_header "高级链路诊断"
+  ui_subtitle "只读采集 PMTU、qdisc drop/backlog、P1 单流和 P4 多流容量，不写系统参数。"
+  prompt_link_context || {
+    [ "$MENU_RETURNED" = "1" ] && return 0
+    return 1
+  }
+  echo
+  ui_note "强干预" "不会修改 MTU、防火墙、路由、TBF/HTB 或 qos-agent。"
+  if ! prompt_read "按回车开始高级诊断，输入 0 返回主菜单："; then return 1; fi
+  if is_back_choice "$PROMPT_REPLY"; then
+    return_to_menu
+    return 0
+  fi
+  advanced_diagnose_mode --host "$host" --port "$iperf_port" \
+    --machine-role "$CONTEXT_MACHINE_ROLE" --critical-direction "$CONTEXT_CRITICAL_DIRECTION" \
+    --protocol-class "$CONTEXT_PROTOCOL_CLASS" --proxy-software "$CONTEXT_PROXY_SOFTWARE" \
+    --traffic-path "$CONTEXT_TRAFFIC_PATH"
 }
 
 client_menu() {
@@ -4614,6 +5132,7 @@ client_menu() {
     ui_menu_item "3" "查看本机状态" "系统 / TCP 参数"
     ui_menu_item "4" "查看服务端状态" "会话 / 测速服务"
     ui_menu_item "5" "查看过程记录" "中文摘要日志"
+    ui_menu_item "a" "高级链路诊断" "PMTU / qdisc / P1 / P4，只读不写入"
     echo
     ui_menu_group "测速"
     ui_menu_item "8" "iperf3 速度测试" "简单测速，不修改参数" "$COLOR_CYAN"
@@ -4636,6 +5155,7 @@ client_menu() {
       3) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
       4) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
       5) clear_screen; print_header "过程记录"; render_agent_events_summary "$peer" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
+      a|A) MENU_RETURNED="0"; run_client_advanced_diagnosis "$host" "$iperf_port"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
       6)
         clear_screen
         print_header "回滚最近修改"
@@ -4793,6 +5313,7 @@ $APP_NAME $APP_VERSION
   sh tcp-tune.sh apply-profile 中距均衡
   sh tcp-tune.sh apply-buffers RMEM_MAX WMEM_MAX
   sh tcp-tune.sh auto --host IP --direction download --objective retrans --target-retr 0 --rtt-ms 100
+  sh tcp-tune.sh advanced-diagnose --host IP --machine-role relay --protocol-class tcp
   sh tcp-tune.sh AI测速
   sh tcp-tune.sh AI自动优化 --host IPV6 --objective startup --rounds 5
   sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
@@ -4901,6 +5422,9 @@ main() {
     AI自动优化|ai-auto)
       ai_auto_mode "$@"
       ;;
+    advanced-diagnose|高级诊断)
+      advanced_diagnose_mode "$@"
+      ;;
     local-minimal)
       ipv6_peer=""
       while [ "$#" -gt 0 ]; do
@@ -4964,6 +5488,11 @@ main() {
       aggressive="0"
       allow_same_public="0"
       reverse="1"
+      machine_role="endpoint"
+      critical_direction="download"
+      protocol_class="unknown"
+      proxy_software=""
+      traffic_path=""
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --host) require_option_value "$1" "${2:-}"; host="$2"; shift 2 ;;
@@ -4989,12 +5518,17 @@ main() {
           --ramp) require_option_value "$1" "${2:-}"; ramp_rate="$2"; shift 2 ;;
           --aggressive) aggressive="1"; shift ;;
           --allow-same-public-ip) allow_same_public="1"; shift ;;
+          --machine-role) require_option_value "$1" "${2:-}"; machine_role="$2"; shift 2 ;;
+          --critical-direction) require_option_value "$1" "${2:-}"; critical_direction="$2"; shift 2 ;;
+          --protocol-class) require_option_value "$1" "${2:-}"; protocol_class="$2"; shift 2 ;;
+          --proxy-software) require_option_value "$1" "${2:-}"; proxy_software="$2"; shift 2 ;;
+          --traffic-path) require_option_value "$1" "${2:-}"; traffic_path="$2"; shift 2 ;;
           *) die "未知 auto 参数：$1" ;;
         esac
       done
       [ -n "$host" ] || die "auto 需要 --host"
       validate_port_value "$port" || die "--port 必须在 1 和 65535 之间。"
-      auto_tune "$host" "$port" "$objective" "$target_retr" "$rounds" "$reverse" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive" "$allow_same_public"
+      auto_tune "$host" "$port" "$objective" "$target_retr" "$rounds" "$reverse" "$local_mbps" "$peer_mbps" "$rtt_ms" "$memory_mb_value" "$ramp_rate" "$aggressive" "$allow_same_public" "$machine_role" "$critical_direction" "$protocol_class" "$proxy_software" "$traffic_path"
       ;;
     stop-agent) stop_agent ;;
     *) usage; die "未知命令：$cmd" ;;

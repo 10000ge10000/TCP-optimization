@@ -30,6 +30,7 @@ TCP-optimization 是一个双端 TCP 调优脚本，用来在 VPS 和客户端�
 - 预制参数：按 RTT 和链路距离提供五档 TCP 参数，写入前会先检测并推荐。
 - 三种确定性优化：重传优先、吞吐优先、快速起速。
 - AI 智能调参：AI 只返回结构化建议，脚本按白名单和数值边界执行。
+- 高级链路诊断：只读采集角色、协议、PMTU、qdisc drop/backlog、P1/P4 对比，不默认写 MTU/TC。
 - OpenWrt 轻量支持：OpenWrt 端不要求 python3。
 - 安全清理：Ctrl+C 或菜单停止会清理本工具创建的 Agent/iperf3。
 - 回滚备份：每次写入参数前都会保存备份，客户端首次运行会记录本机与服务端的默认快照。
@@ -74,6 +75,7 @@ Windows 无 winget/choco/scoop 时，脚本会把 iperf3 下载到用户缓存�
 [3] 查看本机状态      系统 / TCP 参数
 [4] 查看服务端状态    会话 / 测速服务
 [5] 查看过程记录      中文摘要日志
+[a] 高级链路诊断      PMTU / qdisc / P1 / P4，只读不写入
 [8] iperf3 速度测试   简单测速，不修改参数
 [6] 回滚最近修改      恢复最近一次参数写入
 [9] 恢复默认值        显示本机 / 服务端首次快照状态
@@ -109,6 +111,24 @@ sudo sh tcp-tune.sh apply-profile 中距均衡
 | 快速起速 | 网页、小文件、短连接 | 缩短连接初期提速时间 |
 
 AI 智能调参里的默认模式也是“快速起速”，不是均衡模式。
+
+## 高级诊断依据
+
+默认稳定自动优化仍然只用单 peer、P1 单线程 iperf3 做调参依据。高级链路诊断会额外采集机器角色、关键方向、协议类型、出口接口 MTU、PMTU、qdisc drop/backlog delta，以及 P1/P4 对比，用来判断问题更像本机队列、路径、对端还是上游拥塞。
+
+命令行示例：
+
+```sh
+sudo sh tcp-tune.sh advanced-diagnose --host SERVER --machine-role relay --critical-direction both --protocol-class tcp
+```
+
+> 注意：高级诊断不修改 MTU、防火墙、路由、TBF/HTB 或 qos-agent。`protocol-class=udp-quic` 时，脚本只输出诊断建议，不默认写 TCP sysctl。
+
+成功保留的自动调参报告会写入：
+
+```text
+/var/lib/tcp-tune/profiles/latest.md
+```
 
 ## OpenWrt 会被修改什么
 

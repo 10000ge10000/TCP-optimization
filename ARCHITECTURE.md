@@ -47,7 +47,8 @@ https://github.com/10000ge10000/TCP-optimization
 - 客户端模式：探测并上报局域网 IPv4，记录本机首次 TCP/sysctl 快照，进入客户端菜单。
 - 智能推荐：按 BDP、RTT、内存和目标生成 TCP 参数。
 - 自动优化：提供重传优先、吞吐优先、快速起速三种目标，按 iperf3 Retr、总吞吐和首秒吞吐迭代调整参数；最后一轮不写入未经复测的参数，指标退化时自动撤销最新调整。
-- AI 自动调参：`ai-auto` 将脱敏测速摘要发送给项目 AI 网关，模型只返回结构化 JSON，脚本按白名单和上下限校验后执行。
+- 高级诊断：只读采集 `machine_role`、`critical_direction`、`protocol_class`、PMTU、出口 MTU、qdisc drop/backlog delta、P1/P4 对比，不执行强干预写入。
+- AI 自动调参：`ai-auto` 将脱敏测速摘要和链路上下文发送给项目 AI 网关，模型只返回结构化 JSON，脚本按白名单和上下限校验后执行；`udp-quic` 场景只输出建议，不默认写 TCP sysctl。
 - 双端适配：`vps-adapt` 主要调整 VPS 发送侧，`local-minimal` 只对 OpenWrt 写入少量必要 TCP 参数。
 - 客户端展示：隐藏代理公网地址，展示本机 LAN 地址和语义化测速结果；原始 sysctl 参数降级为详细信息。
 - 备份回滚：每次写入前保存 live sysctl 快照；恢复默认值使用首次运行快照，不消费最近一次回滚备份。
@@ -165,6 +166,7 @@ Agent 是临时 HTTP 服务，默认监听 `0.0.0.0:39188`，通过随机 token 
 ├── backups/
 ├── initial-defaults/
 ├── initial-defaults.path
+├── profiles/
 ├── rolled-back/
 ├── sessions/
 ├── agent-PORT.pid
@@ -189,6 +191,8 @@ OpenWrt: /etc/sysctl.d/zz-tcp-ipv6-local-peer.conf
 - Python Agent 只执行固定脚本参数，不接受任意 shell 命令。
 - AI 决策只允许结构化 JSON，不接受任意 shell 命令。
 - AI 可写入参数受白名单和数值上下限限制；OpenWrt 侧不会修改防火墙、WAN、DNS、DHCP、代理服务或路由。
+- PMTU、P4 多流、qdisc drop/backlog delta 只作为诊断证据；MTU、TBF/HTB、qos-agent、策略路由和多 peer 并发测试不属于默认自动优化动作。
+- 调参报告写入 `/var/lib/tcp-tune/profiles/latest.md`，只记录脱敏上下文、P1/P4、PMTU、qdisc delta、参数摘要、备份路径和保留/回滚原因。
 - Ctrl+C、菜单停止和 `/stop` 会清理本工具创建的 pid、token、连接 URL 和临时 Agent 脚本，并保留日志和参数备份。
 - 不停止没有 pid 记录的长期 iperf3，避免误杀用户自建服务。
 
