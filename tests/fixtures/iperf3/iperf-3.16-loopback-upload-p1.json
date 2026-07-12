@@ -1,0 +1,163 @@
+{
+  "end": {
+    "cpu_utilization_percent": {
+      "host_system": 96.96731942580635,
+      "host_total": 98.92175130760752,
+      "host_user": 1.95433199771665,
+      "remote_system": 51.3891657810282,
+      "remote_total": 54.58296046579837,
+      "remote_user": 3.193794684770166
+    },
+    "receiver_tcp_congestion": "bbr",
+    "sender_tcp_congestion": "bbr",
+    "streams": [
+      {
+        "receiver": {
+          "bits_per_second": 27613780248.76047,
+          "bytes": 6908149760,
+          "end": 2.001363,
+          "seconds": 2.00132,
+          "sender": true,
+          "socket": 5,
+          "start": 0
+        },
+        "sender": {
+          "bits_per_second": 27616993264.44546,
+          "bytes": 6908805120,
+          "end": 2.00132,
+          "max_rtt": 38,
+          "max_snd_cwnd": 1113211,
+          "max_snd_wnd": 28561408,
+          "mean_rtt": 37,
+          "min_rtt": 36,
+          "retransmits": 3,
+          "seconds": 2.00132,
+          "sender": true,
+          "socket": 5,
+          "start": 0
+        }
+      }
+    ],
+    "sum_received": {
+      "bits_per_second": 27613780248.76047,
+      "bytes": 6908149760,
+      "end": 2.001363,
+      "seconds": 2.001363,
+      "sender": true,
+      "start": 0
+    },
+    "sum_sent": {
+      "bits_per_second": 27616993264.44546,
+      "bytes": 6908805120,
+      "end": 2.00132,
+      "retransmits": 3,
+      "seconds": 2.00132,
+      "sender": true,
+      "start": 0
+    }
+  },
+  "intervals": [
+    {
+      "streams": [
+        {
+          "bits_per_second": 27195469574.757507,
+          "bytes": 3410624512,
+          "end": 1.003292,
+          "omitted": false,
+          "pmtu": 65535,
+          "retransmits": 3,
+          "rtt": 36,
+          "rttvar": 10,
+          "seconds": 1.0032919645309448,
+          "sender": true,
+          "snd_cwnd": 1113211,
+          "snd_wnd": 28561408,
+          "socket": 5,
+          "start": 0
+        }
+      ],
+      "sum": {
+        "bits_per_second": 27195469574.757507,
+        "bytes": 3410624512,
+        "end": 1.003292,
+        "omitted": false,
+        "retransmits": 3,
+        "seconds": 1.0032919645309448,
+        "sender": true,
+        "start": 0
+      }
+    },
+    {
+      "streams": [
+        {
+          "bits_per_second": 28040741758.37603,
+          "bytes": 3498180608,
+          "end": 2.00132,
+          "omitted": false,
+          "pmtu": 65535,
+          "retransmits": 0,
+          "rtt": 38,
+          "rttvar": 11,
+          "seconds": 0.9980279803276062,
+          "sender": true,
+          "snd_cwnd": 982245,
+          "snd_wnd": 28561408,
+          "socket": 5,
+          "start": 1.003292
+        }
+      ],
+      "sum": {
+        "bits_per_second": 28040741758.37603,
+        "bytes": 3498180608,
+        "end": 2.00132,
+        "omitted": false,
+        "retransmits": 0,
+        "seconds": 0.9980279803276062,
+        "sender": true,
+        "start": 1.003292
+      }
+    }
+  ],
+  "start": {
+    "connected": [
+      {
+        "local_host": "192.0.2.1",
+        "local_port": 60064,
+        "remote_host": "192.0.2.1",
+        "remote_port": 5218,
+        "socket": 5
+      }
+    ],
+    "connecting_to": {
+      "host": "192.0.2.1",
+      "port": 5218
+    },
+    "cookie": "<redacted>",
+    "fq_rate": 0,
+    "rcvbuf_actual": 87380,
+    "sndbuf_actual": 16384,
+    "sock_bufsize": 0,
+    "system_info": "Linux ip-172-26-14-217 6.12.94+deb13-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.94-1 (2026-06-20) x86_64",
+    "target_bitrate": 0,
+    "tcp_mss_default": 22528,
+    "test_start": {
+      "bidir": 0,
+      "blksize": 131072,
+      "blocks": 0,
+      "bytes": 0,
+      "duration": 2,
+      "fqrate": 0,
+      "num_streams": 1,
+      "omit": 0,
+      "protocol": "TCP",
+      "reverse": 0,
+      "target_bitrate": 0,
+      "tos": 0
+    },
+    "timestamp": {
+      "time": "1970-01-01T00:00:00Z",
+      "timesecs": 1783846343
+    },
+    "version": "iperf 3.16"
+  }
+}

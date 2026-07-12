@@ -1,3 +1,15 @@
 name = "tcp-optimization-ai-gateway"
 main = "workers/nvidia-ai-gateway.js"
 compatibility_date = "2026-06-27"
+
+[[durable_objects.bindings]]
+name = "SUBJECT_LIMITER"
+class_name = "SubjectLimiter"
+
+[[durable_objects.bindings]]
+name = "UPSTREAM_CIRCUIT"
+class_name = "UpstreamCircuit"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SubjectLimiter", "UpstreamCircuit"]

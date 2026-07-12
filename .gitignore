@@ -1,0 +1,9 @@
+*.log
+*.tmp
+node_modules/
+coverage/
+.worker-dist/
+.test-tools/
+testResults.xml
+__pycache__/
+*.py[cod]

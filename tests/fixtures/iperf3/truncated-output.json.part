@@ -1,0 +1,1 @@
+{"start":{"version":"iperf 3.x","test_start":{"reverse":0,"num_streams":1}},"intervals":[{"sum":{"bits_per_second":1000000}}],"end":

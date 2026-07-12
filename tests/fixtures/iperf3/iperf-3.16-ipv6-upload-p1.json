@@ -1,0 +1,10 @@
+{
+  "end": {},
+  "error": "unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: Connection refused",
+  "intervals": [],
+  "start": {
+    "connected": [],
+    "system_info": "Linux ip-172-26-14-217 6.12.94+deb13-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.94-1 (2026-06-20) x86_64",
+    "version": "iperf 3.16"
+  }
+}

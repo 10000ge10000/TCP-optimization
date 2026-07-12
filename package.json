@@ -1,0 +1,16 @@
+{
+  "name": "tcp-optimization-worker",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:worker": "vitest run tests/worker",
+    "check:worker": "node --check workers/nvidia-ai-gateway.js",
+    "build:worker": "wrangler deploy --dry-run --outdir .worker-dist"
+  },
+  "devDependencies": {
+    "vitest": "3.2.7",
+    "wrangler": "4.110.0"
+  }
+}

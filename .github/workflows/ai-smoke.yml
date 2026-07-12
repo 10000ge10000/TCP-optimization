@@ -15,17 +15,23 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ai-smoke
+  cancel-in-progress: false
+
 jobs:
   ai-smoke:
     name: Benchmark NVIDIA models
     runs-on: ubuntu-latest
+    environment: ai-smoke
+    timeout-minutes: 10
     env:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       NVIDIA_MODEL: ${{ inputs.model }}
       TCP_TUNE_AI_TIMEOUT: ${{ inputs.timeout }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Validate scripts
         run: |

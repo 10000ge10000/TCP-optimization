@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "platform": "linux-test-endpoint",
+  "cases": [
+    {
+      "name": "missing-kernel-parameter",
+      "transaction_result": "skipped",
+      "unsupported_logged": true,
+      "runtime_restored": true
+    },
+    {
+      "name": "partial-load-failure",
+      "transaction_result": "failed",
+      "runtime_restored": true,
+      "readonly_value_unchanged": true,
+      "managed_file_restored": true
+    },
+    {
+      "name": "performance-regression",
+      "transaction_result": "rolled-back",
+      "runtime_restored": true,
+      "managed_file_restored": true
+    }
+  ],
+  "source": "sanitized real kernel and dual-end validation"
+}

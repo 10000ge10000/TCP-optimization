@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "transport": "http",
+  "host": "server.example.invalid",
+  "agent_port": 39218,
+  "cases": [
+    {"name": "no-token", "expected_status": 403, "actual_status": 403},
+    {"name": "wrong-token", "expected_status": 403, "actual_status": 403},
+    {"name": "header-token", "expected_status": 200, "actual_status": 200},
+    {"name": "query-token-disabled", "expected_status": 403, "actual_status": 403},
+    {"name": "readonly-optimize", "expected_status": 403, "actual_status": 403},
+    {"name": "readonly-apply-profile", "expected_status": 403, "actual_status": 403},
+    {"name": "readonly-apply-buffers", "expected_status": 403, "actual_status": 403},
+    {"name": "invalid-direction", "expected_status": 400, "actual_status": 400},
+    {"name": "invalid-negative-metric", "expected_status": 400, "actual_status": 400},
+    {"name": "unknown-field", "expected_status": 400, "actual_status": 400},
+    {"name": "malformed-json", "expected_status": 400, "actual_status": 400},
+    {"name": "oversized-body", "expected_status": 413, "actual_status": 413},
+    {"name": "ssrf-private-target", "expected_status": 403, "actual_status": 403},
+    {"name": "restore-fixed-defaults", "expected_status": 200, "actual_status": 200}
+  ],
+  "token_in_process_args": false,
+  "token_in_server_log": false,
+  "source": "sanitized real dual-end validation"
+}

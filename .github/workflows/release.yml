@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-linux:
+    name: Verify Linux, Agent and Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Validate semantic tag
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag must use Semantic Versioning with a v prefix" >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          grep -F "APP_VERSION=\"$version\"" src/core/config.sh >/dev/null || {
+            echo "Tag does not match Shell APP_VERSION" >&2
+            exit 1
+          }
+          grep -F "\$AppVersion = \"$version\"" src/windows/00-entry.ps1 >/dev/null || {
+            echo "Tag does not match PowerShell AppVersion" >&2
+            exit 1
+          }
+
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes busybox shellcheck
+
+      - name: Verify generated distribution
+        run: sh scripts/check-generated.sh
+
+      - name: Run Shell and Agent checks
+        run: |
+          bash -n tcp-tune.sh
+          dash -n tcp-tune.sh
+          busybox ash -n tcp-tune.sh
+          shellcheck -s sh tcp-tune.sh
+          sh tests/shell/run.sh
+          sh tests/agent/run.sh
+          python3 -m unittest discover -s tests/validation -p 'test_*.py'
+
+      - name: Run Worker tests
+        run: |
+          npm ci
+          npm test
+          npm run check:worker
+          npm run build:worker
+          npm audit --audit-level=high
+
+      - name: Check repository state
+        run: |
+          git diff --check
+          git diff --exit-code
+
+  verify-windows:
+    name: Verify PowerShell 5.1 and 7
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Parse and test with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          .\scripts\build-powershell.ps1 -Check
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\tcp-tune.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count) { $errors | Format-List; exit 1 }
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Invoke-Pester -Path .\tests\powershell -CI
+
+      - name: Parse and test with PowerShell 7
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\tcp-tune.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count) { $errors | Format-List; exit 1 }
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Invoke-Pester -Path .\tests\powershell -CI
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - verify-linux
+      - verify-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Regenerate distribution
+        run: sh scripts/build-shell.sh
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          prefix="tcp-optimization-${version}/"
+          git archive --format=tar.gz --prefix="$prefix" -o "tcp-optimization-${version}.tar.gz" "$GITHUB_SHA"
+          git archive --format=zip --prefix="$prefix" -o "tcp-optimization-${version}.zip" "$GITHUB_SHA"
+          sha256sum tcp-tune.sh tcp-tune.ps1 "tcp-optimization-${version}.tar.gz" "tcp-optimization-${version}.zip" > SHA256SUMS
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            tcp-tune.sh \
+            tcp-tune.ps1 \
+            "tcp-optimization-${GITHUB_REF_NAME#v}.tar.gz" \
+            "tcp-optimization-${GITHUB_REF_NAME#v}.zip" \
+            SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "TCP-optimization ${GITHUB_REF_NAME}"

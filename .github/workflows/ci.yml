@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: Shell and Agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install POSIX test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes busybox shellcheck
+
+      - name: Verify generated distribution
+        run: sh scripts/check-generated.sh
+
+      - name: Parse generated Shell script
+        run: |
+          bash -n tcp-tune.sh
+          dash -n tcp-tune.sh
+          busybox ash -n tcp-tune.sh
+          shellcheck -s sh tcp-tune.sh
+
+      - name: Run Shell unit tests
+        run: sh tests/shell/run.sh
+
+      - name: Run Agent integration tests
+        run: sh tests/agent/run.sh
+
+      - name: Run validation tool tests
+        run: python3 -m unittest discover -s tests/validation -p 'test_*.py'
+
+      - name: Check whitespace and generated tree
+        run: |
+          git diff --check
+          git diff --exit-code
+
+  powershell:
+    name: PowerShell 5.1 and 7
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Parse with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          .\scripts\build-powershell.ps1 -Check
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\tcp-tune.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count) { $errors | Format-List; exit 1 }
+
+      - name: Parse with PowerShell 7
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\tcp-tune.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count) { $errors | Format-List; exit 1 }
+
+      - name: Install and run Pester with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Invoke-Pester -Path .\tests\powershell -CI
+
+      - name: Install Pester for PowerShell 7
+        shell: pwsh
+        run: Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run Pester with PowerShell 7
+        shell: pwsh
+        run: Invoke-Pester -Path .\tests\powershell -CI
+
+  worker:
+    name: Worker tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run Worker tests
+        run: |
+          npm test
+          npm run check:worker
+          npm run build:worker
+          npm audit --audit-level=high
+
+      - name: Check uncommitted test output
+        run: git diff --exit-code

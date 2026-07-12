@@ -73,3 +73,67 @@
 - 写入类调参必须验证备份、加载、复测、退化回滚链路；最后一轮不能留下未经复测的新参数。
 - 单独修改 `AGENTS.md` 时，不需要运行脚本语法检查；必须读取修改后的 Markdown、检查 `git diff -- AGENTS.md`，并确认没有敏感信息被写入。
 - 提交前搜索确认没有 API Key、SSH 私钥、密码、真实 token 被写入仓库。
+
+## 源码与生成文件
+
+- Shell 采用“源码模块化、发布单文件化”。功能源码放在 `src/`，根目录 `tcp-tune.sh` 是自动生成的发行文件。
+- 模块依赖方向固定为 `core -> platform -> tuning / agent / ai -> cli`，禁止底层模块反向调用 CLI 或读取菜单输入。
+- `src/core` 只能放配置、退出码、通用工具、校验、JSON 和 UI 基础能力，不得执行 Agent、菜单或 sysctl 业务。
+- `src/platform` 只实现平台检测、能力矩阵、参数存在性和写入白名单。
+- `src/tuning` 的纯计算函数必须接收显式参数并返回结果；不得直接绘制菜单或读取交互输入。
+- `src/agent/http_agent.py` 保持独立可测试，构建时嵌入发行脚本；OpenWrt 客户端运行路径仍不得依赖 Python。
+- Shell 模块合并顺序由 `scripts/shell-modules.txt` 唯一定义。构建不得加入时间戳、随机值或机器路径，连续两次构建必须字节一致。
+- 不得直接手工修改根目录生成脚本后跳过源码同步。修改 Shell 源码后必须重新生成并运行一致性检查。
+- PowerShell 若拆分源码，根目录 `tcp-tune.ps1` 仍必须保持可直接下载运行，且源码模块可被 Pester 单独导入测试。
+
+## 开发命令
+
+Shell 构建和静态检查：
+
+```sh
+sh scripts/build-shell.sh
+sh scripts/check-generated.sh
+bash -n tcp-tune.sh
+dash -n tcp-tune.sh
+busybox ash -n tcp-tune.sh
+shellcheck -s sh tcp-tune.sh
+```
+
+测试入口：
+
+```sh
+sh tests/shell/run.sh
+sh tests/agent/run.sh
+npm ci
+npm test
+```
+
+PowerShell：
+
+```powershell
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseFile(
+  (Resolve-Path .\tcp-tune.ps1),
+  [ref]$tokens,
+  [ref]$errors
+) | Out-Null
+if ($errors.Count) { $errors; exit 1 }
+
+Invoke-Pester .\tests\powershell
+```
+
+- CI 测试只能使用临时状态目录、fixtures 和 fake sysctl，不得修改运行器的真实 sysctl、qdisc、网络接口或防火墙。
+- `dry-run` 测试必须证明项目管理文件和系统路径均未发生写入。
+- iperf3 解析测试必须覆盖多版本 fixtures、上传/下载方向、缺失字段、数值 0 和无效 JSON。
+- Agent 测试必须覆盖 header token、query token 兼容开关、请求体上限、SSRF、TTL、锁、PID 身份和只读端点。
+- Worker 测试使用 mock 上游，不得在普通 CI 中读取真实 API Key 或发送真实 AI 请求。
+
+## 版本与发布
+
+- 版本号遵循 Semantic Versioning；`CHANGELOG.md` 使用 Added、Changed、Fixed、Security、Breaking Changes 等明确分类。
+- 普通 CI 权限只读。真实 AI smoke 只能手动触发，必须使用受保护 environment、单并发和显式超时。
+- Release 工作流只能响应维护者创建的 `v*` tag，不得自动创建或推送 tag。
+- 发布前必须执行完整测试和生成一致性检查；产物至少包含 Shell、PowerShell、源码压缩包和 `SHA256SUMS`。
+- GitHub Actions 使用最小权限；只有 Release job 可以申请 `contents: write`。
+- 发布流程不得在日志、产物、Release Notes 或校验文件中包含 token、API Key、密码、Cookie、SSH 私钥或用户测试主机信息。
