@@ -276,6 +276,9 @@ check_equal "unknown rate remains unknown" unknown "$(format_rate unknown)"
 
 ensure_dependency() { return 0; }
 iperf3() { printf '%s\n' "$*"; }
+# 这两条断言只关心 iperf3 参数拼接。直接执行而不走进程身份 manifest：
+# 桩函数瞬间退出会让 /proc/<pid>/stat 读取竞态失败（PID 身份逻辑另有专门用例）。
+run_owned_iperf_client() { "$@"; }
 ipv6_args="$(run_iperf_client '2001:db8::1' 5201 0 5 '2001:db8::2' 1)"
 case "$ipv6_args" in
   *'-B 2001:db8::2'*) passed=$((passed + 1)); printf 'ok - legal IPv6 bind is preserved\n' ;;
