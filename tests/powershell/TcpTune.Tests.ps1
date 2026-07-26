@@ -114,6 +114,76 @@ Describe "strict AI JSON" {
   }
 }
 
+Describe "strict AI v2 decision" {
+  It "pins the first configured model instead of latency probing" {
+    $oldModel = $env:NVIDIA_MODEL
+    try {
+      $env:NVIDIA_MODEL = "auto"
+      $script:AiModelCandidates = @("model-first", "model-second")
+      Select-AIModel | Should -Be "model-first"
+    } finally {
+      $env:NVIDIA_MODEL = $oldModel
+      $script:AiModelCandidates = @("gpt-5.5")
+    }
+  }
+
+  BeforeAll {
+    $validCandidate = '{"schema_version":"2","action":"test_candidate","diagnosis_class":"local_send_queue","confidence_milli":825,"candidate_id":"candidate_1","measurement_id":"","evidence_ids":"windows_1,upload.p1","reason_codes":"queue_pressure,retrans_high","expected_metric":"retransmits","expected_direction":"decrease","stop_reason":"none"}'
+  }
+
+  It "accepts the exact flat v2 schema" {
+    $value = ConvertFrom-AIDecisionV2 $validCandidate
+    $value.action | Should -Be "test_candidate"
+    $value.confidence_milli | Should -Be 825
+    Get-WindowsAIV2ActionLabel $value.action | Should -Match "Windows"
+  }
+
+  It "rejects missing, unknown and duplicate JSON fields" {
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace ',"stop_reason":"none"', '') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace '}$', ',"command":"whoami"}') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace '"confidence_milli":825', '"confidence_milli":825,"confidence_milli":700') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace '"action":', '"Action":') } | Should -Throw
+  }
+
+  It "rejects invalid enums, confidence and duplicate semantics" {
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace 'local_send_queue', 'invented') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace '"confidence_milli":825', '"confidence_milli":1001') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace 'windows_1,upload.p1', 'windows_1,windows_1') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace 'queue_pressure,retrans_high', 'queue_pressure,queue_pressure') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace 'windows_1,upload.p1', '') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace '"schema_version":"2"', '"schema_version":2') } | Should -Throw
+  }
+
+  It "enforces action-specific semantics" {
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace '"candidate_id":"candidate_1"', '"candidate_id":""') } | Should -Throw
+    { ConvertFrom-AIDecisionV2 ($validCandidate -replace '"candidate_id":"candidate_1"', '"candidate_id":null') } | Should -Throw
+    $measure = '{"schema_version":"2","action":"measure","diagnosis_class":"unstable_evidence","confidence_milli":400,"candidate_id":"","measurement_id":"windows_2","evidence_ids":"windows_1","reason_codes":"need_more_samples","expected_metric":"throughput","expected_direction":"stable","stop_reason":"need_measurement"}'
+    (ConvertFrom-AIDecisionV2 $measure).action | Should -Be "measure"
+    $noChange = '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":950,"candidate_id":"","measurement_id":"","evidence_ids":"windows_1","reason_codes":"already_stable","expected_metric":"none","expected_direction":"none","stop_reason":"platform_read_only"}'
+    (ConvertFrom-AIDecisionV2 $noChange).action | Should -Be "stop_no_change"
+    $complete = $noChange -replace 'stop_no_change', 'stop_complete' -replace 'platform_read_only', 'objective_met'
+    (ConvertFrom-AIDecisionV2 $complete).action | Should -Be "stop_complete"
+  }
+
+  It "preserves unavailable evidence as null and keeps real zero numeric" {
+    $upload = [pscustomobject]@{ BitsPerSecond = 0; Retransmits = $null; FirstSecondBitsPerSecond = $null }
+    $download = [pscustomobject]@{ BitsPerSecond = 1000; Retransmits = 0; FirstSecondBitsPerSecond = 0 }
+    $evidence = New-WindowsAIEvidenceV2 -Objective retrans -Upload $upload -Download $download -RttMs $null -MeasurementId "windows_1"
+    $evidence.schema_version | Should -BeExactly "2"
+    $evidence.rtt_ms | Should -BeNullOrEmpty
+    $evidence.upload.throughput_bps | Should -Be 0
+    $evidence.upload.retransmits | Should -BeNullOrEmpty
+    $evidence.download.retransmits | Should -Be 0
+    $evidence.constraints.system_tcp_write_allowed | Should -BeFalse
+    $evidence.constraints.candidate_execution_allowed | Should -BeFalse
+  }
+
+  It "contains no Windows TCP stack writer in the AI module" {
+    $source = Get-Content -LiteralPath (Join-Path $script:RepoRoot "src\windows\40-ai.ps1") -Raw -Encoding UTF8
+    $source | Should -Not -Match '(?im)^\s*(netsh|Set-NetTCPSetting|Set-ItemProperty|New-ItemProperty)\b'
+  }
+}
+
 Describe "AI credential boundary" {
   BeforeEach {
     $script:seenHeaders = $null

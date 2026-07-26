@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$AppVersion = "0.2.0"
+$AppVersion = "0.3.0"
 $RepoUrl = "https://github.com/10000ge10000/TCP-optimization"
 $ToolRoot = Join-Path $env:LOCALAPPDATA "TCP-optimization"
 $IperfCacheDir = Join-Path $ToolRoot "iperf3"
@@ -724,15 +724,10 @@ function Test-RetransmitsAtOrBelowTarget {
 function Select-AIModel {
   if ($env:NVIDIA_MODEL -and $env:NVIDIA_MODEL -ne "auto") { return $env:NVIDIA_MODEL }
   if (-not $env:NVIDIA_MODEL) { return $DefaultAiModel }
-  foreach ($model in $AiModelCandidates) {
-    try {
-      $ok = Invoke-AIChat -Model $model -Prompt "Return only OK." -MaxTokens 16
-      if ($ok) { return $model }
-    } catch {
-      continue
-    }
-  }
-  throw "没有可用 AI 模型。"
+  if ($AiModelCandidates.Count -lt 1) { throw "没有已配置的 AI 模型。" }
+  # Tuning pins one configured alias for the entire session. A short latency
+  # probe is not evidence that a model is accurate enough for TCP decisions.
+  return [string]$AiModelCandidates[0]
 }
 
 function ConvertFrom-AIJson {
@@ -750,6 +745,140 @@ function ConvertFrom-AIJson {
   if ([string]$result.action -match '[\r\n]' -or ([string]$result.action).Length -gt 256) { throw "AI action 超出限制。" }
   if ([string]$result.reason -match '[\r\n]' -or ([string]$result.reason).Length -gt 512) { throw "AI reason 超出限制。" }
   return $result
+}
+
+function New-WindowsAIEvidenceV2 {
+  param(
+    [ValidateSet("startup", "throughput", "retrans")][string]$Objective,
+    [Parameter(Mandatory = $true)]$Upload,
+    [Parameter(Mandatory = $true)]$Download,
+    [Nullable[Int64]]$RttMs,
+    [string]$MeasurementId
+  )
+  if (-not $MeasurementId) {
+    $MeasurementId = "windows_{0}_{1}" -f [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(), ([guid]::NewGuid().ToString("N").Substring(0, 8))
+  }
+  if ($MeasurementId -notmatch '^[a-z][a-z0-9_-]{0,63}$') { throw "AI measurement_id 格式无效。" }
+
+  return [pscustomobject][ordered]@{
+    schema_version = "2"
+    platform = "windows"
+    read_only = $true
+    objective = $Objective
+    measurement_id = $MeasurementId
+    rtt_ms = $RttMs
+    upload = [pscustomobject][ordered]@{
+      throughput_bps = $Upload.BitsPerSecond
+      retransmits = $Upload.Retransmits
+      first_second_bps = $Upload.FirstSecondBitsPerSecond
+    }
+    download = [pscustomobject][ordered]@{
+      throughput_bps = $Download.BitsPerSecond
+      retransmits = $Download.Retransmits
+      first_second_bps = $Download.FirstSecondBitsPerSecond
+    }
+    constraints = [pscustomobject][ordered]@{
+      system_tcp_write_allowed = $false
+      candidate_execution_allowed = $false
+      allowed_actions = @("measure", "test_candidate", "stop_no_change", "stop_complete")
+    }
+  }
+}
+
+function Test-AICsvIdentifiers {
+  param(
+    [AllowNull()][string]$Value,
+    [int]$MaximumItems,
+    [string]$Pattern,
+    [string]$FieldName
+  )
+  if ([string]::IsNullOrEmpty($Value)) { return @() }
+  if ($Value.Length -gt 768 -or $Value.Trim() -ne $Value) { throw "AI $FieldName 格式无效。" }
+  $items = @($Value -split ',', -1)
+  if ($items.Count -gt $MaximumItems -or @($items | Where-Object { $_ -notmatch $Pattern }).Count -gt 0) {
+    throw "AI $FieldName 格式无效。"
+  }
+  $unique = @($items | Select-Object -Unique)
+  if ($unique.Count -ne $items.Count) { throw "AI $FieldName 包含重复语义。" }
+  return $items
+}
+
+function ConvertFrom-AIDecisionV2 {
+  param([string]$Text)
+  if (-not $Text -or $Text.Length -gt 16000) { throw "AI v2 响应为空或过大。" }
+  $trimmed = $Text.Trim()
+  if (-not ($trimmed.StartsWith("{") -and $trimmed.EndsWith("}"))) { throw "AI v2 必须只返回一个 JSON 对象。" }
+
+  $keyMatches = [regex]::Matches($trimmed, '(?<!\\)"(?<key>[A-Za-z_][A-Za-z0-9_]*)"\s*:')
+  $wireKeys = @($keyMatches | ForEach-Object { $_.Groups["key"].Value })
+  $seenWireKeys = @{}
+  foreach ($wireKey in $wireKeys) {
+    $semanticKey = $wireKey.ToLowerInvariant()
+    if ($seenWireKeys.ContainsKey($semanticKey)) { throw "AI v2 JSON 包含重复字段。" }
+    $seenWireKeys[$semanticKey] = $true
+  }
+
+  try { $result = $trimmed | ConvertFrom-Json -ErrorAction Stop } catch { throw "AI v2 返回的 JSON 无效。" }
+  if ($null -eq $result -or $result -is [array] -or $result -is [string]) { throw "AI v2 响应必须是扁平对象。" }
+  $allowed = @(
+    "schema_version", "action", "diagnosis_class", "confidence_milli", "candidate_id",
+    "measurement_id", "evidence_ids", "reason_codes", "expected_metric", "expected_direction", "stop_reason"
+  )
+  $names = @($result.PSObject.Properties.Name)
+  if ($names.Count -ne $allowed.Count) { throw "AI v2 JSON 字段数量无效。" }
+  if (@($names | Where-Object { -not ($allowed -ccontains $_) }).Count -gt 0) { throw "AI v2 JSON 包含未知字段。" }
+  foreach ($required in $allowed) { if (-not ($names -ccontains $required)) { throw "AI v2 JSON 缺少字段：$required" } }
+
+  if ($result.schema_version -isnot [string] -or $result.schema_version -cne "2") { throw "AI schema_version 必须为字符串 2。" }
+  if ($result.confidence_milli -isnot [int] -and $result.confidence_milli -isnot [long]) { throw "AI confidence_milli 类型无效。" }
+  if ([int64]$result.confidence_milli -lt 0 -or [int64]$result.confidence_milli -gt 1000) { throw "AI confidence_milli 超出范围。" }
+
+  $actions = @("measure", "test_candidate", "stop_no_change", "stop_complete")
+  $diagnoses = @("healthy_no_change", "path_congestion", "local_send_queue", "bdp_limited", "congestion_control_mismatch", "qdisc_pressure", "cpu_memory_limited", "pmtu_issue", "unstable_evidence", "unsupported_protocol")
+  $metrics = @("throughput", "retransmits", "first_second", "rtt", "qdisc_drop", "qdisc_backlog", "none")
+  $directions = @("increase", "decrease", "stable", "none")
+  $stopReasons = @("none", "need_measurement", "no_safe_candidate", "objective_met", "platform_read_only", "unsupported_protocol", "budget_exhausted", "unstable_evidence")
+  if ([string]$result.action -notin $actions) { throw "AI action 枚举无效。" }
+  if ([string]$result.diagnosis_class -notin $diagnoses) { throw "AI diagnosis_class 枚举无效。" }
+  if ([string]$result.expected_metric -notin $metrics) { throw "AI expected_metric 枚举无效。" }
+  if ([string]$result.expected_direction -notin $directions) { throw "AI expected_direction 枚举无效。" }
+  if ([string]$result.stop_reason -notin $stopReasons) { throw "AI stop_reason 枚举无效。" }
+
+  foreach ($idField in @("candidate_id", "measurement_id")) {
+    $idValue = $result.$idField
+    if ($idValue -isnot [string] -or ($idValue.Length -gt 0 -and $idValue -notmatch '^[a-z][a-z0-9_-]{0,63}$')) {
+      throw "AI $idField 格式无效。"
+    }
+  }
+  if ($result.evidence_ids -isnot [string] -or $result.reason_codes -isnot [string]) { throw "AI evidence_ids/reason_codes 类型无效。" }
+  if ([string]::IsNullOrEmpty([string]$result.evidence_ids)) { throw "AI evidence_ids 不能为空。" }
+  [void](Test-AICsvIdentifiers -Value $result.evidence_ids -MaximumItems 12 -Pattern '^[a-z][a-z0-9_.]{0,63}$' -FieldName "evidence_ids")
+  [void](Test-AICsvIdentifiers -Value $result.reason_codes -MaximumItems 8 -Pattern '^[a-z][a-z0-9_]{0,47}$' -FieldName "reason_codes")
+
+  $hasCandidate = -not [string]::IsNullOrEmpty([string]$result.candidate_id)
+  $hasMeasurement = -not [string]::IsNullOrEmpty([string]$result.measurement_id)
+  switch ([string]$result.action) {
+    "measure" {
+      if ($hasCandidate -or -not $hasMeasurement) { throw "AI measure 决策语义无效。" }
+    }
+    "test_candidate" {
+      if (-not $hasCandidate -or $hasMeasurement) { throw "AI test_candidate 决策语义无效。" }
+    }
+    "stop_no_change" { if ($hasCandidate -or $hasMeasurement) { throw "AI stop_no_change 决策语义无效。" } }
+    "stop_complete" { if ($hasCandidate -or $hasMeasurement) { throw "AI stop_complete 决策语义无效。" } }
+  }
+  return $result
+}
+
+function Get-WindowsAIV2ActionLabel {
+  param([string]$Action)
+  switch ($Action) {
+    "measure" { return "需要补充测量" }
+    "test_candidate" { return "建议测试候选（Windows 只读，不执行）" }
+    "stop_no_change" { return "停止且不修改" }
+    "stop_complete" { return "目标已满足，结束分析" }
+    default { throw "未知 AI v2 action。" }
+  }
 }
 
 function Invoke-WindowsAITuning {
@@ -773,6 +902,7 @@ function Invoke-WindowsAITuning {
 
   Write-Host ""
   Write-Section "测速"
+  $rtt = Get-RttMilliseconds -HostName $HostName
   Write-Note "上传" "本机 -> 对端"
   $upload = Get-IperfMetrics -Result (Run-Iperf -HostName $HostName -Port $Port -LocalAddress $LocalAddress)
   Write-Note "下载" "对端 -> 本机"
@@ -798,31 +928,30 @@ function Invoke-WindowsAITuning {
   }) | Out-Null
 
   $model = Select-AIModel
-  $summary = [pscustomobject]@{
-    objective = $objective
-    role = "windows"
-    upload_bits_per_second = $upload.BitsPerSecond
-    upload_retransmits = $upload.Retransmits
-    download_bits_per_second = $download.BitsPerSecond
-    download_retransmits = $download.Retransmits
-    first_second_bits_per_second = $download.FirstSecondBitsPerSecond
-  } | ConvertTo-Json -Compress
+  $evidence = New-WindowsAIEvidenceV2 -Objective $objective -Upload $upload -Download $download -RttMs $rtt
+  $evidenceJson = $evidence | ConvertTo-Json -Depth 8 -Compress
   $prompt = @"
-You are a conservative TCP tuning assistant for a Windows client.
-Return only JSON: {"action":"short Chinese action","risk":"low|medium|high","reason":"short Chinese reason","windows_change":"none|manual-only"}.
-Do not suggest shell commands. Windows client should not auto-write TCP stack.
-Objective: $objectiveName
-Metrics: $summary
+You are the read-only Windows analyst in a conservative TCP tuning controller.
+Return exactly one flat JSON object with these fields and no others:
+{"schema_version":"2","action":"measure|test_candidate|stop_no_change|stop_complete","diagnosis_class":"controlled enum","confidence_milli":0,"candidate_id":"","measurement_id":"","evidence_ids":"comma_separated_ids","reason_codes":"comma_separated_codes","expected_metric":"throughput|retransmits|first_second|rtt|qdisc_drop|qdisc_backlog|none","expected_direction":"increase|decrease|stable|none","stop_reason":"controlled enum"}
+Never return commands or parameter values. Windows is read-only: never claim that a TCP setting was applied.
+Evidence: $evidenceJson
 "@
-  $decision = ConvertFrom-AIJson (Invoke-AIChat -Model $model -Prompt $prompt -MaxTokens 512)
+  $decision = ConvertFrom-AIDecisionV2 (Invoke-AIChat -Model $model -Prompt $prompt -MaxTokens 512)
   Write-Host ""
   Write-Section "AI 建议摘要"
   Write-MetricLine "模型" $model "Cyan"
   Write-MetricLine "目标" $objectiveName "Cyan"
-  Write-MetricLine "建议动作" (Repair-DisplayText ([string]$decision.action)) "Yellow"
-  Write-MetricLine "风险" (Repair-DisplayText ([string]$decision.risk)) $(if ($decision.risk -eq "low") { "Green" } else { "Yellow" })
+  Write-MetricLine "建议动作" (Get-WindowsAIV2ActionLabel ([string]$decision.action)) "Yellow"
+  Write-MetricLine "诊断类别" (Repair-DisplayText ([string]$decision.diagnosis_class)) "Cyan"
+  Write-MetricLine "置信度" ("{0:N1}%" -f ([int64]$decision.confidence_milli / 10.0)) $(if ([int64]$decision.confidence_milli -ge 700) { "Green" } else { "Yellow" })
+  Write-MetricLine "预期指标" ("{0} / {1}" -f $decision.expected_metric, $decision.expected_direction) "Cyan"
+  Write-MetricLine "理由代码" $(if ($decision.reason_codes) { $decision.reason_codes } else { "未提供" }) "Cyan"
+  Write-MetricLine "停止原因" $decision.stop_reason "Cyan"
   Write-MetricLine "修改方式" "Windows 默认不自动写 TCP 栈" "Green"
-  Write-MetricLine "AI 理由" (Repair-DisplayText ([string]$decision.reason)) "Cyan"
+  if ($decision.action -eq "test_candidate") {
+    Write-Note "只读边界" "候选仅供 Linux/OpenWrt 端受控流程参考；Windows 不执行、不写注册表、不调用 netsh。"
+  }
   return $true
 }
 

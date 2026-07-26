@@ -215,6 +215,26 @@ Worker 对请求执行可选客户端鉴权、实际 body 大小限制、message
 
 公共网关只能接收 `TCP_TUNE_AI_GATEWAY_TOKEN`；`NVIDIA_API_KEY` 只能发送到明确配置的 NVIDIA 官方直连地址。客户端不会获得上游密钥、内部模型库存或原始错误正文。
 
+### AI v2 闭环
+
+```text
+重复基线采集 → 严格证据快照 → 确定性证据层 → AI 处理剩余歧义
+      ↑                                  ↓
+独立 holdout ← 本地目标与护栏判定 ← 事务写入并复测
+      └──────── 不满足时立即回滚 ────────┘
+```
+
+- `src/ai/protocol.sh` 定义严格 11 字段决策协议；Shell 和 PowerShell 使用相同枚举、类型及交叉字段约束。
+- `src/ai/controller.sh` 拥有状态机和预算。AI 不接触命令、主机路径、原始参数值或写入 API，只能选择本地 allowlist ID。
+- Worker 的确定性证据层先处理只读/UDP、零重传、既往退化回滚、无本地 qdisc 压力的路径拥塞、BDP 和首秒比例；这些数学与安全结论不交给模型猜测。模型只处理剩余歧义，失败时不写入。
+- 每方向默认 5 个样本，离散度超限时扩展至 10 个；缺失或不稳定证据会失败关闭。
+- 写入仍通过既有事务层。主样本通过后还要等待 30 秒并执行 3 样本 holdout；失败即恢复写入前快照。
+- 活动候选在提交 holdout 前始终挂接备份；信号、异常或正常退出都会恢复未提交事务。最近一次脱敏事件原子保存为 `profiles/ai-last-events.jsonl`，不记录模型思维链或原始响应。
+- `/v1/tuning/decision` 在 Worker 侧重新校验请求和决策。推理文本中只有“唯一且完整通过协议校验”的 JSON 才可提取；多个候选或任一越权字段均拒绝。
+- NVIDIA 上游使用 guided JSON；熔断状态按上游和固定模型隔离。模型输出即使合法，也不能绕过本地多样本、holdout 和回滚。
+- Windows/macOS 与 `udp-quic` 请求不得获得 TCP 写入候选。Windows 仅解析和展示决策，不修改系统 TCP 栈。
+- `chat/completions` 兼容端点不会向客户端公开上游 `reasoning_content`；专用调参端点仅在内部用它尝试一次结构修复。
+
 ## CLI、机器输出与退出码
 
 现有命令、中文别名和菜单编号保持兼容。Shell 支持 `--json`、`--non-interactive`、`--no-color`，PowerShell 对应 `-Json`、`-NonInteractive`、`-NoColor`。

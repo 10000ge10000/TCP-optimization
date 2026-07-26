@@ -138,7 +138,7 @@ $APP_NAME $APP_VERSION
   sh tcp-tune.sh auto --host IP --direction download --objective retrans --target-retr 0 --rtt-ms 100
   sh tcp-tune.sh advanced-diagnose --host IP --machine-role relay --protocol-class tcp
   sh tcp-tune.sh AI测速
-  sh tcp-tune.sh AI自动优化 --host IPV6 --objective startup --rounds 5
+  sh tcp-tune.sh AI自动优化 --host IPV6 --objective startup --rounds 5 [--max-minutes 30] [--max-experiments 3] [--fallback stable]
   sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
   sh tcp-tune.sh local-minimal --ipv6-peer IPV6
   sh tcp-tune.sh vps-adapt --peer-ipv6 IPV6 --profile cubic-safe
@@ -156,7 +156,12 @@ AI 环境变量：
   TCP_TUNE_AI_GATEWAY_URL 默认项目公共网关；普通用户无需配置
   NVIDIA_API_KEY    仅直连 NVIDIA 时需要，只从环境变量读取，不写入仓库或日志
   NVIDIA_BASE_URL   默认 https://integrate.api.nvidia.com/v1；直接连接 NVIDIA 时使用
-  NVIDIA_MODEL      默认 gpt-5.5；设为 auto 时会在候选模型中选择可用项
+  NVIDIA_MODEL      默认 gpt-5.5；设为 auto 时固定使用候选列表首个别名
   TCP_TUNE_AI_TIMEOUT 默认 90 秒，适配完整 JSON 决策输出
+  TCP_TUNE_AI_SAMPLE_COUNT 默认 5；波动超过阈值时自动扩展到最多 10 次
+  TCP_TUNE_AI_MAX_MINUTES 默认 30；单次闭环总时间预算
+  TCP_TUNE_AI_MAX_EXPERIMENTS 默认 3；单次闭环候选实验预算
+  TCP_TUNE_AI_MIN_CANDIDATE_CONFIDENCE 默认 650；低于该值不执行候选写入
+  TCP_TUNE_AI_PROTOCOL 默认 auto；支持 tuning-v2 或兼容 chat-completions
 EOF
 }

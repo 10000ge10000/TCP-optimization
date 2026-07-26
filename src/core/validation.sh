@@ -82,15 +82,8 @@ validate_objective() {
   case "${1:-}" in retrans|throughput|startup) return 0 ;; *) return 1 ;; esac
 }
 
-validate_model_name() {
-  value="${1:-}"
-  [ -n "$value" ] && [ "${#value}" -le 128 ] || return 1
-  case "$value" in -*|*[!A-Za-z0-9._/-]*) return 1 ;; esac
-  return 0
-}
-
-ai_max_notsent() {
-  value="$TCP_TUNE_AI_MAX_NOTSENT"
+max_notsent_lowat() {
+  value="$TCP_TUNE_MAX_NOTSENT"
   validate_positive_int_range "$value" 16384 2147483647 || value=1048576
   echo "$value"
 }

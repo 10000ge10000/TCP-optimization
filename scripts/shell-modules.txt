@@ -17,9 +17,6 @@ src/tuning/diagnostics.sh
 src/tuning/transaction.sh
 src/tuning/rollback.sh
 src/agent/lifecycle.sh
-src/ai/client.sh
-src/ai/schema.sh
-src/ai/optimizer.sh
 src/cli/server-dashboard.sh
 src/cli/client-menu.sh
 src/cli/commands.sh

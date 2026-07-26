@@ -28,8 +28,8 @@
 维护者在本地显式创建并推送 annotated tag：
 
 ```sh
-git tag -a v0.2.0 -m "TCP-optimization v0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "TCP-optimization v0.3.0"
+git push origin v0.3.0
 ```
 
 此操作会触发 Release 工作流。工作流重新执行静态检查和测试，再生成：
@@ -37,8 +37,8 @@ git push origin v0.2.0
 ```text
 tcp-tune.sh
 tcp-tune.ps1
-tcp-optimization-v0.2.0.tar.gz
-tcp-optimization-v0.2.0.zip
+tcp-optimization-v0.3.0.tar.gz
+tcp-optimization-v0.3.0.zip
 SHA256SUMS
 ```
 

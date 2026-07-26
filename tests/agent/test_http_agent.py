@@ -26,7 +26,9 @@ class AgentIntegrationTests(unittest.TestCase):
         self.token = "a" * 64
         fake = Path(self.temp.name) / "fake-script.sh"
         fake.write_text("#!/bin/sh\ncase \"${1:-}\" in _iperf-json) printf '{\"end\":{}}' ;; status) printf '{}' ;; defaults-status) exit 1 ;; stop-agent) exit 0 ;; restore-defaults) exit 0 ;; esac\n", encoding="utf-8")
-        fake.chmod(0o700)
+        # The downloaded single-file script is commonly invoked through `sh`
+        # and may not carry its executable bit. The Agent must support that.
+        fake.chmod(0o600)
         env = os.environ.copy()
         env.update({
             "TCP_TUNE_TOKEN": self.token,
@@ -89,6 +91,18 @@ class AgentIntegrationTests(unittest.TestCase):
         status, payload = self.request("POST", "/apply-buffers", {})
         self.assertEqual(status, 403)
         self.assertEqual(payload["error_code"], "server_read_only")
+
+    def test_fixed_script_commands_do_not_require_executable_bit(self):
+        status, payload = self.request("GET", "/status")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+
+    def test_control_endpoints_reject_unknown_body_fields(self):
+        for path in ("/restore-defaults", "/stop"):
+            with self.subTest(path=path):
+                status, payload = self.request("POST", path, {"sysctl": {"net.ipv4.ip_forward": 1}})
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error_code"], "unknown_fields")
 
     def test_pairing_and_test_target_policy(self):
         self.assertEqual(self.request("POST", "/report", {"role": "test", "lan_ip": "127.0.0.1"})[0], 200)

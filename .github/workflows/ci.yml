@@ -41,8 +41,14 @@ jobs:
       - name: Run Agent integration tests
         run: sh tests/agent/run.sh
 
+      - name: Run AI controller integration tests
+        run: sh tests/ai/run.sh
+
       - name: Run validation tool tests
         run: python3 -m unittest discover -s tests/validation -p 'test_*.py'
+
+      - name: Run Router validation tests
+        run: sh tests/router/run.sh
 
       - name: Check whitespace and generated tree
         run: |
@@ -110,6 +116,7 @@ jobs:
       - name: Run Worker tests
         run: |
           npm test
+          npm run test:worker-runtime
           npm run check:worker
           npm run build:worker
           npm audit --audit-level=high

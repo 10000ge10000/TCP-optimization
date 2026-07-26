@@ -19,20 +19,16 @@
 )
 
 $ErrorActionPreference = "Stop"
-$AppVersion = "0.2.0"
+$AppVersion = "0.3.0"
 $RepoUrl = "https://github.com/10000ge10000/TCP-optimization"
 $ToolRoot = Join-Path $env:LOCALAPPDATA "TCP-optimization"
 $IperfCacheDir = Join-Path $ToolRoot "iperf3"
-$DefaultAiGatewayUrl = "https://tcp-optimization-ai-gateway.yiwan-share.workers.dev/v1"
-$DefaultAiModel = "gpt-5.5"
-$AiModelCandidates = @("gpt-5.5")
 $ExitSuccess = 0
 $ExitArguments = 2
 $ExitDependency = 3
 $ExitNetwork = 4
 $ExitAuthentication = 5
 $ExitBenchmark = 6
-$ExitAi = 8
 $IperfPackage = [pscustomobject]@{
   Version = "3.18"
   Asset = "iperf-3.18-win64.zip"

@@ -151,6 +151,9 @@ stop_verified_process() {
   start_id="$(manifest_value "$manifest_file" start)"
   marker="$(manifest_value "$manifest_file" marker)"
   [ -z "$expected_session" ] || [ "$session" = "$expected_session" ] || return 2
+  # A sibling process (for example the Agent cleanup hook) may already have
+  # stopped this exact PID. Treat a dead PID as stale state, not identity reuse.
+  kill -0 "$pid" 2>/dev/null || return 4
   if ! process_matches_manifest "$pid" "$start_id" "$marker"; then
     warn "进程身份校验失败，拒绝终止 PID $pid。"
     return 3

@@ -162,6 +162,8 @@ check_equal "IPv6 PMTU without probe support is unsupported" "unsupported" "$(pr
 have_cmd() { [ "$1" = "ip" ]; }
 ip() { return 1; }
 check_equal "route command failure is failed" "failed" "$(route_iface_for_host '2001:db8::1')"
+have_cmd() { return 1; }
+check_equal "missing tc overrides route failure" "unsupported unsupported" "$(qdisc_stats failed)"
 
 have_cmd() { [ "$1" = "tracepath" ]; }
 tracepath() { return 1; }
@@ -250,6 +252,11 @@ if grep -F 'warn "已完成 $completed_rounds 轮，重传尚未降至目标值�
 else
   failed=$((failed + 1)); printf 'not ok - result uses configured maximum rounds\n' >&2
 fi
+if grep -F 'ui_note "结果" "已完成基线测试，本轮没有写入参数。"' "$ROOT_DIR/src/tuning/optimizer.sh" >/dev/null 2>&1; then
+  passed=$((passed + 1)); printf 'ok - baseline-only result does not claim retained parameters\n'
+else
+  failed=$((failed + 1)); printf 'not ok - baseline-only result claims retained parameters\n' >&2
+fi
 
 # 脱敏真实 fixtures：覆盖 3.17.1 P1/P4、3.16 成功/失败和截断输出。
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -270,6 +277,71 @@ if extract_bps < "$ROOT_DIR/tests/fixtures/iperf3/truncated-output.json.part" >/
   failed=$((failed + 1)); printf 'not ok - truncated fixture produced throughput\n' >&2
 else
   passed=$((passed + 1)); printf 'ok - truncated fixture is rejected\n'
+fi
+
+# AI v2 决策协议必须严格保持 11 个字段，并在进入控制器前拒绝歧义输出。
+ai_v2_valid_candidate='{"schema_version":"2","action":"test_candidate","diagnosis_class":"local_send_queue","confidence_milli":900,"candidate_id":"queue_decrease_25","measurement_id":"","evidence_ids":"upload.retransmits,qdisc","reason_codes":"high_retrans,queue_pressure","expected_metric":"retransmits","expected_direction":"decrease","stop_reason":"none"}'
+ai_v2_valid_measure='{"schema_version":"2","action":"measure","diagnosis_class":"unstable_evidence","confidence_milli":700,"candidate_id":"","measurement_id":"repeat_critical","evidence_ids":"upload.cv","reason_codes":"unstable_samples","expected_metric":"none","expected_direction":"none","stop_reason":"need_measurement"}'
+check_true "AI v2 accepts exact candidate decision" validate_ai_v2_decision "$ai_v2_valid_candidate"
+check_true "AI v2 accepts exact measure decision" validate_ai_v2_decision "$ai_v2_valid_measure"
+
+ai_v2_expect_rejected() {
+  test_name="$1"; payload="$2"
+  if validate_ai_v2_decision "$payload"; then
+    failed=$((failed + 1)); printf 'not ok - %s\n' "$test_name" >&2
+  else
+    passed=$((passed + 1)); printf 'ok - %s\n' "$test_name"
+  fi
+}
+
+ai_v2_expect_rejected "AI v2 rejects unknown field" '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate","extra":"x"}'
+ai_v2_expect_rejected "AI v2 rejects missing field" '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none"}'
+ai_v2_expect_rejected "AI v2 rejects duplicate field" '{"schema_version":"2","action":"stop_no_change","action":"stop_complete","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+ai_v2_expect_rejected "AI v2 rejects invalid action" '{"schema_version":"2","action":"execute","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+ai_v2_expect_rejected "AI v2 rejects invalid diagnosis" '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"magic_fix","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+ai_v2_expect_rejected "AI v2 rejects confidence overflow" '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":1001,"candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+ai_v2_expect_rejected "AI v2 rejects numeric schema version" '{"schema_version":2,"action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+ai_v2_expect_rejected "AI v2 rejects quoted confidence" '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":"900","candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+ai_v2_expect_rejected "AI v2 rejects candidate and measurement together" '{"schema_version":"2","action":"test_candidate","diagnosis_class":"local_send_queue","confidence_milli":900,"candidate_id":"queue_decrease_25","measurement_id":"repeat_critical","evidence_ids":"upload.retransmits","reason_codes":"high_retrans","expected_metric":"retransmits","expected_direction":"decrease","stop_reason":"none"}'
+ai_v2_expect_rejected "AI v2 rejects stop with candidate" '{"schema_version":"2","action":"stop_complete","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"queue_decrease_25","measurement_id":"","evidence_ids":"current_params","reason_codes":"objective_met","expected_metric":"none","expected_direction":"none","stop_reason":"objective_met"}'
+ai_v2_expect_rejected "AI v2 rejects empty evidence" '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+ai_v2_expect_rejected "AI v2 rejects duplicate evidence" '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"current_params,current_params","reason_codes":"healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+ai_v2_expect_rejected "AI v2 rejects duplicate reason codes" '{"schema_version":"2","action":"stop_no_change","diagnosis_class":"healthy_no_change","confidence_milli":900,"candidate_id":"","measurement_id":"","evidence_ids":"current_params","reason_codes":"healthy,healthy","expected_metric":"none","expected_direction":"none","stop_reason":"no_safe_candidate"}'
+
+check_true "AI v2 candidate allowlist accepts exact ID" ai_v2_id_allowed queue_decrease_25 'queue_decrease_25,mtu_probe_enable'
+if ai_v2_id_allowed queue_decrease 'queue_decrease_25,mtu_probe_enable'; then
+  failed=$((failed + 1)); printf 'not ok - AI v2 candidate allowlist rejects partial ID\n' >&2
+else
+  passed=$((passed + 1)); printf 'ok - AI v2 candidate allowlist rejects partial ID\n'
+fi
+check_true "AI v2 evidence allowlist accepts known IDs" ai_v2_evidence_allowed 'upload.retransmits,qdisc' 'upload.retransmits,qdisc,current_params'
+if ai_v2_evidence_allowed 'upload.retransmits,invented.metric' 'upload.retransmits,qdisc,current_params'; then
+  failed=$((failed + 1)); printf 'not ok - AI v2 evidence allowlist rejects invented evidence\n' >&2
+else
+  passed=$((passed + 1)); printf 'ok - AI v2 evidence allowlist rejects invented evidence\n'
+fi
+
+check_equal "OpenWrt retrans candidate policy" 'queue_decrease_25,queue_decrease_50,mtu_probe_enable' "$(ai_v2_available_candidates openwrt retrans tcp)"
+check_equal "OpenWrt throughput candidate policy" 'queue_increase_25' "$(ai_v2_available_candidates openwrt throughput tcp)"
+check_equal "VPS throughput candidate policy" 'queue_increase_25,buffer_increase_25,cc_bbr' "$(ai_v2_available_candidates vps throughput tcp)"
+check_equal "UDP QUIC has no TCP candidate" '' "$(ai_v2_available_candidates vps throughput udp-quic)"
+
+ai_before='{"upload_bits_per_second":100000000,"upload_retransmits":100,"upload_first_second_bits_per_second":50000000,"upload_cv_percent":1,"upload_retransmits_cv_percent":1,"upload_first_second_cv_percent":1,"download_bits_per_second":200000000,"download_retransmits":20,"download_first_second_bits_per_second":100000000,"download_cv_percent":1,"download_retransmits_cv_percent":1,"download_first_second_cv_percent":1}'
+ai_after_retrans='{"upload_bits_per_second":97000000,"upload_retransmits":80,"upload_first_second_bits_per_second":48000000,"upload_cv_percent":1,"upload_retransmits_cv_percent":1,"upload_first_second_cv_percent":1,"download_bits_per_second":200000000,"download_retransmits":20,"download_first_second_bits_per_second":100000000,"download_cv_percent":1,"download_retransmits_cv_percent":1,"download_first_second_cv_percent":1}'
+ai_after_throughput='{"upload_bits_per_second":106000000,"upload_retransmits":110,"upload_first_second_bits_per_second":48000000,"upload_cv_percent":1,"upload_retransmits_cv_percent":1,"upload_first_second_cv_percent":1,"download_bits_per_second":200000000,"download_retransmits":20,"download_first_second_bits_per_second":100000000,"download_cv_percent":1,"download_retransmits_cv_percent":1,"download_first_second_cv_percent":1}'
+ai_after_startup='{"upload_bits_per_second":95000000,"upload_retransmits":110,"upload_first_second_bits_per_second":54000000,"upload_cv_percent":1,"upload_retransmits_cv_percent":1,"upload_first_second_cv_percent":1,"download_bits_per_second":200000000,"download_retransmits":20,"download_first_second_bits_per_second":100000000,"download_cv_percent":1,"download_retransmits_cv_percent":1,"download_first_second_cv_percent":1}'
+check_true "AI v2 retrans objective uses critical upload" ai_v2_candidate_passes retrans "$ai_before" "$ai_after_retrans" upload 0 1
+check_true "AI v2 throughput objective uses critical upload" ai_v2_candidate_passes throughput "$ai_before" "$ai_after_throughput" upload 10 1
+check_true "AI v2 startup objective uses first-second upload" ai_v2_candidate_passes startup "$ai_before" "$ai_after_startup" upload 5 1
+if ai_v2_candidate_passes throughput "$ai_before" "$ai_after_throughput" download 10 1; then
+  failed=$((failed + 1)); printf 'not ok - AI v2 does not mix noncritical direction\n' >&2
+else
+  passed=$((passed + 1)); printf 'ok - AI v2 does not mix noncritical direction\n'
+fi
+if ai_v2_candidate_passes retrans "$ai_before" "$ai_after_retrans" upload 0 0; then
+  failed=$((failed + 1)); printf 'not ok - AI v2 guard blocks otherwise improved candidate\n' >&2
+else
+  passed=$((passed + 1)); printf 'ok - AI v2 guard blocks otherwise improved candidate\n'
 fi
 
 printf '%s passed, %s failed\n' "$passed" "$failed"

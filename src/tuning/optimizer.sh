@@ -372,7 +372,11 @@ EOF
     fi
     if [ "$i" -ge "$rounds" ]; then
       echo
-      ui_note "结果" "已达到最大轮数，保留最后一次已验证参数。"
+      if [ "$applied_change_count" -gt 0 ]; then
+        ui_note "结果" "已达到最大轮数，保留最后一次已复测通过的参数。"
+      else
+        ui_note "结果" "已完成基线测试，本轮没有写入参数。"
+      fi
       break
     fi
 

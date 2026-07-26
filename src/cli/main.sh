@@ -82,16 +82,6 @@ main() {
     restore-defaults)
       restore_initial_defaults
       ;;
-    # 中文 AI 命令是面向普通用户的主入口；英文命令保留给旧文档和自动化脚本。
-    AI测速|ai-benchmark-models)
-      ai_benchmark_models
-      ;;
-    AI诊断|ai-diagnose)
-      ai_diagnose_mode "$@"
-      ;;
-    AI自动优化|ai-auto)
-      ai_auto_mode "$@"
-      ;;
     advanced-diagnose|高级诊断)
       advanced_diagnose_mode "$@"
       ;;
@@ -104,7 +94,7 @@ main() {
         esac
       done
       [ -n "$ipv6_peer" ] || warn "未提供 --ipv6-peer，将仅应用本机最小修正。"
-      apply_openwrt_minimal_values 1 0 "$(ai_max_notsent)" 1048576
+      apply_openwrt_minimal_values 1 0 "$(max_notsent_lowat)" 1048576
       ;;
     vps-adapt)
       profile="cubic-safe"

@@ -9,7 +9,6 @@ $modules = @(
   "10-ui.ps1",
   "20-runtime.ps1",
   "30-network.ps1",
-  "40-ai.ps1",
   "50-cli.ps1"
 )
 $utf8 = [Text.UTF8Encoding]::new($false)

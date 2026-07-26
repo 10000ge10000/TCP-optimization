@@ -16,6 +16,8 @@
 - P4 多流测试、PMTU 探测和 qdisc drop/backlog delta 只属于高级诊断或 AI 上下文证据；默认稳定自动优化不能因为这些诊断项而偷偷扩大干预范围。
 - 调参前必须采集这些输入：RTT、单线程 iperf3 上传/下载速率、上传/下载重传、首秒速度、内存、当前拥塞控制、当前 qdisc、当前 `rmem/wmem`、当前 `tcp_notsent_lowat`、当前 `tcp_limit_output_bytes`。
 - AI 调参和高级诊断可以额外采集：`machine_role`、`critical_direction`、`protocol_class`、PMTU、出口接口 MTU、qdisc drop/backlog delta、P1/P4 对比。`proxy_software` 和 `traffic_path` 只进入报告和 AI 上下文，不参与 shell 命令拼接。
+- AI v2 只能返回严格结构化决策并选择本地生成的候选 ID 或补测 ID；不得返回命令、sysctl 参数值、主机路径或扩大写入白名单。参数计算、事务写入、目标判定、holdout 和回滚必须由本地确定性代码完成。
+- AI 候选默认使用 5 次重复样本，波动超限时最多扩展至 10 次；主样本通过后仍需独立 holdout。模型空响应、虚构证据、未知候选或协议错误必须失败关闭，除非用户显式传入稳定优化 fallback。
 - BDP 只能作为初始估算。有效带宽优先取真实 iperf3 测速值；如果用户输入带宽与实测差异明显，自动逻辑必须以实测为准，并在提示中说明链路可能受限。
 - 缓冲区不能照搬超大值，必须受内存、RTT、重传、目标模式和复测结果约束。低内存设备必须主动下调推荐挡位。
 - 服务端模式默认保持只读监控；唯一例外是带 token 的 `restore-defaults` 固定端点只能恢复服务端首次启动时记录的 TCP/sysctl 快照，不能接受任意参数写入。
@@ -104,8 +106,11 @@ shellcheck -s sh tcp-tune.sh
 ```sh
 sh tests/shell/run.sh
 sh tests/agent/run.sh
+sh tests/ai/run.sh
+sh tests/router/run.sh
 npm ci
 npm test
+npm run test:worker-runtime
 ```
 
 PowerShell：

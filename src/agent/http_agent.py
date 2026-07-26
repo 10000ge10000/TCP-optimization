@@ -156,7 +156,12 @@ def terminate_process(proc):
 
 
 def run_cmd(args, timeout):
-    proc = subprocess.Popen(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    if args and args[0] == SCRIPT:
+        args = ["/bin/sh", *args]
+    try:
+        proc = subprocess.Popen(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    except OSError as exc:
+        return {"code": 126, "stdout": "", "stderr": f"unable to start fixed command: {exc.strerror or 'os error'}"}
     with PROCESS_LOCK:
         ACTIVE_PROCESSES.add(proc)
     try:
@@ -320,10 +325,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif path in {"/optimize", "/apply-profile", "/apply-buffers"}:
                 error(self, 403, "server_read_only", "server is read-only")
             elif path == "/restore-defaults":
+                if payload:
+                    error(self, 400, "unknown_fields", "restore-defaults request body must be empty")
+                    return
                 result = run_cmd([SCRIPT, "restore-defaults"], 30)
                 append_event({"time": time.time(), "action": "restore-defaults", "result": result["code"]})
                 write_json(self, 200 if result["code"] == 0 else 500, {"ok": result["code"] == 0, "result": result})
             elif path == "/stop":
+                if payload:
+                    error(self, 400, "unknown_fields", "stop request body must be empty")
+                    return
                 append_event({"time": time.time(), "action": "stop-request"})
                 write_json(self, 200, {"ok": True, "message": "agent stopping"})
                 STOP_EVENT.set()

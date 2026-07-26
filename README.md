@@ -183,10 +183,16 @@ sudo sh tcp-tune.sh AI自动优化 --host 2406:xxxx:xxxx::1 --objective startup 
 sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
 ```
 
-AI 不能执行任意命令，只能返回 JSON。脚本会校验字段白名单和数值上下限后再写入。
+v0.3 使用混合闭环控制器：默认先对上传和下载各做 5 次测试，波动超过阈值时扩展到 10 次。只读/UDP、零重传、既往回滚、qdisc 压力、BDP 和首秒比例等可计算事实先由本地规则处理，AI 只处理剩余歧义并且只能从本机生成的候选 ID 和补测 ID 中选择。实际参数值、写入、复测、目标判定及回滚始终由本地确定性代码负责。候选只有通过主样本和 30 秒后的独立 holdout 才会保留。
+
+AI 不能执行任意命令，也不能返回 sysctl 参数值。决策必须是严格 11 字段的 v2 JSON；未知字段、越权候选、虚构证据、模型空响应或上游失败都会停止且不写入。只有显式传入 `--fallback stable` 时，AI 失败才会切换到原有确定性稳定优化。
+
+最近一次会话的脱敏动作、候选和本地判定结果会原子写入 `$TCP_TUNE_STATE_DIR/profiles/ai-last-events.jsonl`；不会保存模型思维链、token、密钥或原始上游响应。
 
 普通用户默认使用项目提供的 AI 网关，不需要自己配置 API Key。
 默认模型为 `gpt-5.5`，网关由项目方统一转发到 sub2api；可通过 `NVIDIA_MODEL` 覆盖请求模型名。
+
+> 当前 staging A/B 中，NVIDIA 的严格结构服从度高于 Sub2API，但原始模型都未达到独立准确率验收线。项目依赖混合控制器和失败关闭保证安全，不能把“使用 AI”理解为一定获得性能提升。
 
 ## HTTP Agent 安全边界
 
@@ -221,13 +227,20 @@ HTTP Agent 是临时配对与测速控制面，不是面向公网的长期管理
 | `NVIDIA_MODEL` | `gpt-5.5` | 请求模型名或兼容别名 |
 | `TCP_TUNE_AI_TIMEOUT` | `90` | AI 请求超时（秒） |
 | `TCP_TUNE_AI_MAX_ROUNDS` | `5` | AI 调优最大轮数 |
+| `TCP_TUNE_AI_MAX_MINUTES` | `30` | 单次 AI 闭环最长时间（分钟） |
+| `TCP_TUNE_AI_MAX_EXPERIMENTS` | `3` | 单次 AI 闭环最多候选实验数 |
+| `TCP_TUNE_AI_SAMPLE_COUNT` | `5` | 每个方向的默认重复样本数，波动大时最多 10 次 |
+| `TCP_TUNE_AI_OBJECTIVE_MAX_CV_PERCENT` | `20` | 候选保留时目标指标允许的最大 CV；超过即拒绝保留 |
+| `TCP_TUNE_AI_MIN_CANDIDATE_CONFIDENCE` | `650` | AI 发起本地候选实验的最低千分制置信度 |
+| `TCP_TUNE_AI_PROTOCOL` | `auto` | `auto`、`tuning-v2` 或兼容直连 `chat-completions` |
+| `TCP_TUNE_AI_MAX_TOKENS` | `1024` | AI 最大输出 token，不能超过 1024 |
 | `NO_COLOR` | 未设置 | 禁用 ANSI 颜色 |
 
 token、API Key 和密码只能通过环境变量或 GitHub Secrets 提供，不要写入脚本、配置、命令历史或 Issue。
 
 ## 开发与测试
 
-真实双端测试环境、统计结果、失败注入和未验证项见 [v0.2.0 双端验证报告](docs/VALIDATION.md)。报告明确区分“安全闭环有效”和“性能提升已证明”。
+真实双端测试环境、统计结果、失败注入和未验证项见 [验证报告](docs/VALIDATION.md)。报告分别记录 v0.2 双端结果与 v0.3 AI 闭环当前未通过项。
 
 Shell 采用“源码模块化、发布单文件化”：日常修改 `src/`，通过固定模块清单生成根目录 `tcp-tune.sh`。OpenWrt 用户仍只需下载一个文件。
 
@@ -240,6 +253,8 @@ busybox ash -n tcp-tune.sh
 shellcheck -s sh tcp-tune.sh
 sh tests/shell/run.sh
 sh tests/agent/run.sh
+sh tests/ai/run.sh
+sh tests/router/run.sh
 ```
 
 PowerShell 与 Worker：
@@ -260,7 +275,12 @@ Invoke-Pester .\tests\powershell
 ```sh
 npm ci
 npm test
+npm run test:worker-runtime
+npm run check:worker
+npm run build:worker
 ```
+
+离线 AI 场景评分使用 `python3 tests/validation/test_ai_evaluate.py`。合成参考决策通过只证明评分器与标签自洽，不代表真实模型准确率或链路性能已经达标；真实验收结论见 [双端验证报告](docs/VALIDATION.md)。
 
 测试必须使用模拟 sysctl 和临时状态目录，不得修改 CI 主机的真实网络参数。可用命令以当前分支实际文件为准；完整约束见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [AGENTS.md](AGENTS.md)。
 

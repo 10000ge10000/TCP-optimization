@@ -99,12 +99,12 @@ iface_mtu() {
 
 qdisc_stats() {
   iface="$1"
+  have_cmd tc || { echo "unsupported unsupported"; return 0; }
   case "$iface" in
     ""|unknown) echo "unknown unknown"; return 0 ;;
     unsupported) echo "unsupported unsupported"; return 0 ;;
     failed) echo "failed failed"; return 0 ;;
   esac
-  have_cmd tc || { echo "unsupported unsupported"; return 0; }
   qdisc_output="$(tc -s qdisc show dev "$iface" 2>/dev/null)" || { echo "failed failed"; return 0; }
   printf '%s\n' "$qdisc_output" | awk '
     BEGIN { drops = 0; backlog = 0; seen = 0 }
