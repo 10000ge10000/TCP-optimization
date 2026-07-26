@@ -1536,6 +1536,8 @@ normalize_profile() {
 }
 
 profile_values() {
+  # 显式拒绝未知预设：调用方即使在关闭 set -e 的上下文中，也不会拿到空值。
+  profile_exists "$1" || return 1
   name="$(normalize_profile "$1")"
   # 输出: file_max rmem_max wmem_max rmem_min rmem_default rmem_max
   #        wmem_min wmem_default wmem_max adv_win_scale notsent_lowat
@@ -1554,6 +1556,9 @@ profile_values() {
       ;;
     "远距大带宽")
       echo "6815744 186777599 89653247 8192 87380 186777599 8192 65536 89653247 1 196608"
+      ;;
+    *)
+      return 1
       ;;
   esac
 }
@@ -3632,11 +3637,16 @@ def resolve_host(host):
     return values
 
 
-def test_target_allowed(host):
+def resolve_allowed_test_target(host):
+    """校验测试目标并返回钉住的已验证 IP；不允许则返回 None。
+
+    返回解析出的具体地址而非原始主机名，调用方必须用它连接，
+    避免校验与连接之间的二次 DNS 解析（DNS 重绑定 TOCTOU）。
+    """
     try:
         addresses = resolve_host(host)
     except (ValueError, socket.gaierror):
-        return False
+        return None
     explicit = set()
     for allowed in ALLOWED_TEST_HOSTS:
         try:
@@ -3646,7 +3656,11 @@ def test_target_allowed(host):
     with STATE_LOCK:
         peer = PEER_IP
     permitted = explicit | ({peer} if peer else set())
-    return bool(permitted) and addresses.issubset(permitted)
+    if not permitted or not addresses.issubset(permitted):
+        return None
+    if peer and peer in addresses:
+        return peer
+    return sorted(addresses)[0]
 
 
 def append_event(event):
@@ -3723,15 +3737,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             REQUEST_SLOTS.release()
 
     def do_POST(self):
+        if not self._preflight():
+            return
+        # 先在槽外完成鉴权与请求体读取：慢速客户端逐字节喂 body 时
+        # 不得占用并发额度（连接自身仍受 socket 超时约束）。
+        payload = read_json_body(self)
+        if payload is None:
+            return
         if not REQUEST_SLOTS.acquire(blocking=False):
             error(self, 503, "busy", "agent concurrency limit reached")
             return
         try:
-            if not self._preflight():
-                return
-            payload = read_json_body(self)
-            if payload is None:
-                return
             path = urlparse(self.path).path
             if path == "/report":
                 self._report(payload)
@@ -3831,7 +3847,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if port is None or seconds is None or direction not in {"download", "upload"}:
             error(self, 400, "invalid_test_parameters", "invalid test parameters")
             return
-        if not test_target_allowed(host):
+        pinned_target = resolve_allowed_test_target(host)
+        if pinned_target is None:
             error(self, 403, "test_target_denied", "test target is not the paired client or allowlisted")
             return
         if not TEST_SLOT.acquire(blocking=False):
@@ -3839,7 +3856,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         try:
             reverse = "1" if direction == "download" else "0"
-            result = run_cmd([SCRIPT, "_iperf-json", host, str(port), reverse, str(seconds)], seconds + 15)
+            result = run_cmd([SCRIPT, "_iperf-json", pinned_target, str(port), reverse, str(seconds)], seconds + 15)
             append_event({"time": time.time(), "action": "test", "direction": direction, "result": result["code"]})
             write_json(self, 200 if result["code"] == 0 else 502, {"ok": result["code"] == 0, "result": result})
         finally:

@@ -19,6 +19,8 @@ normalize_profile() {
 }
 
 profile_values() {
+  # 显式拒绝未知预设：调用方即使在关闭 set -e 的上下文中，也不会拿到空值。
+  profile_exists "$1" || return 1
   name="$(normalize_profile "$1")"
   # 输出: file_max rmem_max wmem_max rmem_min rmem_default rmem_max
   #        wmem_min wmem_default wmem_max adv_win_scale notsent_lowat
@@ -37,6 +39,9 @@ profile_values() {
       ;;
     "远距大带宽")
       echo "6815744 186777599 89653247 8192 87380 186777599 8192 65536 89653247 1 196608"
+      ;;
+    *)
+      return 1
       ;;
   esac
 }

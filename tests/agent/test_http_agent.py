@@ -25,7 +25,8 @@ class AgentIntegrationTests(unittest.TestCase):
         self.port = free_port()
         self.token = "a" * 64
         fake = Path(self.temp.name) / "fake-script.sh"
-        fake.write_text("#!/bin/sh\ncase \"${1:-}\" in _iperf-json) printf '{\"end\":{}}' ;; status) printf '{}' ;; defaults-status) exit 1 ;; stop-agent) exit 0 ;; restore-defaults) exit 0 ;; esac\n", encoding="utf-8")
+        # _iperf-json 回显收到的 host，供“测试目标已钉住”用例断言。
+        fake.write_text("#!/bin/sh\ncase \"${1:-}\" in _iperf-json) printf '{\"target\":\"%s\",\"end\":{}}' \"$2\" ;; status) printf '{}' ;; defaults-status) exit 1 ;; stop-agent) exit 0 ;; restore-defaults) exit 0 ;; esac\n", encoding="utf-8")
         # The downloaded single-file script is commonly invoked through `sh`
         # and may not carry its executable bit. The Agent must support that.
         fake.chmod(0o600)
@@ -172,6 +173,31 @@ class AgentIntegrationTests(unittest.TestCase):
         stored = payload["peer_reports"][-1]["payload"]
         self.assertIsNone(stored["retransmits"])
         self.assertIsNone(stored["first_second_bits_per_second"])
+
+    def test_slow_body_does_not_hold_concurrency_slot(self):
+        # 并发上限为 2：一个慢速 POST 在读 body 期间不得占用额度，
+        # 否则少量慢速连接即可让合法请求持续收到 503。
+        slow = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        slow.putrequest("POST", "/report")
+        slow.putheader("Host", f"127.0.0.1:{self.port}")
+        slow.putheader("X-TCP-Tune-Token", self.token)
+        slow.putheader("Content-Type", "application/json")
+        slow.putheader("Content-Length", "512")
+        slow.endheaders()
+        try:
+            slow.send(b'{"role":"t')
+            for _ in range(3):
+                self.assertEqual(self.request("GET", "/state")[0], 200)
+        finally:
+            slow.close()
+
+    def test_test_target_is_pinned_to_validated_address(self):
+        self.assertEqual(self.request("POST", "/report", {"role": "test", "lan_ip": "127.0.0.1"})[0], 200)
+        status, payload = self.request("POST", "/test", {"host": "localhost", "port": 5201, "seconds": 1, "direction": "download"})
+        self.assertEqual(status, 200)
+        # 传给 iperf3 的必须是校验时解析出的具体 IP，而非可被重绑定的主机名。
+        forwarded = json.loads(payload["result"]["stdout"])["target"]
+        self.assertEqual(forwarded, "127.0.0.1")
 
     def test_oversized_body_is_rejected_before_parsing(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)

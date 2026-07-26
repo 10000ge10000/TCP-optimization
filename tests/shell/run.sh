@@ -387,6 +387,44 @@ case "$auto_unmet_output" in
   *) failed=$((failed + 1)); printf 'not ok - unmet target reports actual completed rounds\n' >&2 ;;
 esac
 
+# 预制参数：中文名与英文别名必须等价，未知预设必须失败而不是静默返回空值。
+check_true "profile exists by chinese name" profile_exists 中距均衡
+check_true "profile exists by english alias" profile_exists mid-balance
+if profile_exists not-a-profile; then
+  failed=$((failed + 1)); printf 'not ok - unknown profile accepted\n' >&2
+else
+  passed=$((passed + 1)); printf 'ok - unknown profile rejected\n'
+fi
+check_equal "profile alias resolves to same values" "$(profile_values 中距均衡)" "$(profile_values mid-balance)"
+check_equal "profile values field count" 11 "$(profile_values 远距大带宽 | wc -w | tr -d ' ')"
+if (profile_values not-a-profile >/dev/null 2>&1); then
+  failed=$((failed + 1)); printf 'not ok - unknown profile returned values\n' >&2
+else
+  passed=$((passed + 1)); printf 'ok - unknown profile does not return values\n'
+fi
+# 五档 rmem 必须单调不减，否则挡位推荐会前后矛盾。
+profile_monotonic=1
+prev_rmem=0
+for profile_name in 近距轻载 近距高速 中距均衡 长距增强 远距大带宽; do
+  cur_rmem="$(profile_values "$profile_name" | cut -d' ' -f2)"
+  [ "$cur_rmem" -ge "$prev_rmem" ] || profile_monotonic=0
+  prev_rmem="$cur_rmem"
+done
+check_equal "profile rmem ladder is monotonic" 1 "$profile_monotonic"
+
+# 菜单子流程失败必须只提示并返回菜单，不能在 set -e 下终止整个客户端会话。
+menu_guard_probe() { return 1; }
+menu_survived=0
+( set -e; menu_guard_probe || warn "子流程未完成。"; menu_survived=1; [ "$menu_survived" = "1" ] ) >/dev/null 2>&1 \
+  && { passed=$((passed + 1)); printf 'ok - failing menu action does not abort session\n'; } \
+  || { failed=$((failed + 1)); printf 'not ok - failing menu action aborted session\n' >&2; }
+menu_guard_calls="$(grep -cE '^\s+[0-9aAqQ]\)[^)]*\|\| warn ' "$ROOT_DIR/src/cli/client-menu.sh" || true)"
+if [ "$menu_guard_calls" -ge 5 ]; then
+  passed=$((passed + 1)); printf 'ok - client menu branches keep failure guards\n'
+else
+  failed=$((failed + 1)); printf 'not ok - client menu lost failure guards (%s)\n' "$menu_guard_calls" >&2
+fi
+
 # recommend_values 边界：非法输入必须显式返回 ERR，不得静默给出参数。
 case "$(recommend_values 0 500 100 1024 throughput 0.79 0)" in
   ERR*) passed=$((passed + 1)); printf 'ok - recommend rejects zero bandwidth\n' ;;
