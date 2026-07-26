@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-"$ROOT_DIR/scripts/build-shell.sh" --check
+# 经 sh 调用,不依赖仓库中的可执行位(Windows 侧提交容易丢失)。
+sh "$ROOT_DIR/scripts/build-shell.sh" --check
 if command -v powershell >/dev/null 2>&1; then
   powershell -NoProfile -ExecutionPolicy Bypass -File "$ROOT_DIR/scripts/build-powershell.ps1" -Check
 elif command -v pwsh >/dev/null 2>&1; then
