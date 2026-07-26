@@ -102,7 +102,7 @@ progress_steps() {
 start_iperf_server() {
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法启动测试服务。"
   port="$1"
-  if pgrep -f "iperf3.*-s.*-p[[:space:]]+$port" >/dev/null 2>&1; then
+  if pgrep -f "iperf3.*-s.*-p[[:space:]]*$port([^0-9]|\$)" >/dev/null 2>&1; then
     info "检测到端口 $port 已有 iperf3 server，将复用且不会由本工具停止。"
     return 0
   fi

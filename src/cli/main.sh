@@ -14,7 +14,7 @@ main() {
   export ASSUME_YES DRY_RUN OUTPUT_MODE NON_INTERACTIVE NO_COLOR
   setup_colors
   trap 'stop_active_iperf_client; exit 130' INT TERM
-  trap 'stop_active_iperf_client >/dev/null 2>&1 || true' EXIT
+  trap 'tune_abort_cleanup; stop_active_iperf_client >/dev/null 2>&1 || true' EXIT
 
   cmd="${1:-menu}"
   if [ "$#" -gt 0 ]; then shift; fi

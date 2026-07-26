@@ -19,6 +19,7 @@ LISTEN_PUBLIC_URL="${TCP_TUNE_PUBLIC_URL:-}"
 TCP_TUNE_MAX_NOTSENT="${TCP_TUNE_MAX_NOTSENT:-1048576}"
 VPS_ADAPT_FILE="${TCP_TUNE_VPS_ADAPT_FILE:-/etc/sysctl.d/98-tcp-ipv6-openwrt-peer.conf}"
 OPENWRT_MINIMAL_FILE="${TCP_TUNE_OPENWRT_MINIMAL_FILE:-/etc/sysctl.d/zz-tcp-ipv6-local-peer.conf}"
+PENDING_UNVERIFIED_TUNE=0
 OUTPUT_MODE="${TCP_TUNE_OUTPUT_MODE:-human}"
 NON_INTERACTIVE="${TCP_TUNE_NON_INTERACTIVE:-0}"
 TCP_TUNE_SAMPLE_COUNT="${TCP_TUNE_SAMPLE_COUNT:-3}"
@@ -1102,7 +1103,7 @@ progress_steps() {
 start_iperf_server() {
   ensure_dependency iperf3 iperf3 || die "缺少 iperf3，无法启动测试服务。"
   port="$1"
-  if pgrep -f "iperf3.*-s.*-p[[:space:]]+$port" >/dev/null 2>&1; then
+  if pgrep -f "iperf3.*-s.*-p[[:space:]]*$port([^0-9]|\$)" >/dev/null 2>&1; then
     info "检测到端口 $port 已有 iperf3 server，将复用且不会由本工具停止。"
     return 0
   fi
@@ -1352,14 +1353,15 @@ iperf_awk_field() {
   field="$1"
   awk -v wanted="$field" '
     NR == 1 && $0 ~ /[{].*[}]/ { compact=1 }
-    /"intervals"[[:space:]]*:/ { in_intervals=1 }
-    in_intervals && /"sum"[[:space:]]*:/ && first_bps=="" { interval_sum=1; next }
+    # 状态切换只认对象/数组开括号：stream 里的数值字段 "end": 1.000315 不得改变解析状态。
+    /"intervals"[[:space:]]*:[[:space:]]*\[/ { in_intervals=1; in_end=0 }
+    in_intervals && /"sum"[[:space:]]*:[[:space:]]*[{]/ && first_bps=="" { interval_sum=1; next }
     interval_sum && /"bits_per_second"[[:space:]]*:/ {
       line=$0; sub(/^.*"bits_per_second"[[:space:]]*:[[:space:]]*/, "", line); sub(/[^0-9.eE+-].*$/, "", line)
       if (line ~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/) first_bps=line
       interval_sum=0
     }
-    /"end"[[:space:]]*:/ { in_end=1; in_intervals=0 }
+    /"end"[[:space:]]*:[[:space:]]*[{]/ { in_end=1; in_intervals=0 }
     in_end && /"sum_received"[[:space:]]*:/ { block="received"; next }
     in_end && /"sum_sent"[[:space:]]*:/ { block="sent"; next }
     in_end && /"sum"[[:space:]]*:/ { block="sum"; next }
@@ -1705,7 +1707,8 @@ recommend_values() {
       }
 
       min_bw = local < peer ? local : peer
-      base_bdp = ceil((min_bw * 1024 * 1024 / 8) * rtt / 1000)
+      # Mbps 使用 SI 单位（1 Mbps = 10^6 bit/s），不能按 2^20 计算。
+      base_bdp = ceil((min_bw * 1000 * 1000 / 8) * rtt / 1000)
       if (base_bdp < 16384) base_bdp = 16384
 
       mem_bytes = mem * 1024 * 1024
@@ -1934,6 +1937,14 @@ EOF
 
 # BEGIN src/tuning/optimizer.sh
 # Module: src/tuning/optimizer.sh
+# 中断/异常退出时回滚"已写入但未复测"的参数，兑现"仅保留经过复测的调整"承诺。
+tune_abort_cleanup() {
+  [ "${PENDING_UNVERIFIED_TUNE:-0}" = "1" ] || return 0
+  PENDING_UNVERIFIED_TUNE=0
+  warn "会话中断：正在回滚尚未复测的参数写入。"
+  rollback_last >/dev/null 2>&1 || true
+}
+
 current_max_buffers() {
   rmem="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 67108864)"
   wmem="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 67108864)"
@@ -2148,6 +2159,7 @@ auto_tune() {
     if [ "$sample_rc" != "0" ]; then
       if [ "$applied_change_count" -gt 0 ]; then
         rollback_last >/dev/null 2>&1 || true
+        PENDING_UNVERIFIED_TUNE=0
       fi
       if [ "$sample_rc" = "2" ]; then
         DIE_EXIT_CODE="$EXIT_BENCHMARK" die "测速离散度超过 ${TCP_TUNE_MAX_SPREAD_PERCENT}%，结果不稳定，已回滚本轮参数。"
@@ -2225,6 +2237,7 @@ EOF
     fi
 
     if [ "$applied_change_count" -gt 0 ] && [ -n "$previous_retr" ]; then
+      PENDING_UNVERIFIED_TUNE=0
       if objective_step_improved "$objective" "$previous_bps" "$bps" "$previous_retr" "$retr" "$previous_startup_bps" "$startup_bps" "$target_retr"; then
         ui_note "验证" "上一轮写入已让目标指标改善，保留本轮参数。"
       else
@@ -2323,6 +2336,8 @@ EOF
     IFS="$old_ifs"
     apply_buffers "$step_rmem" "$step_wmem" "$step_adv" "$step_notsent" "$step_backlog" "$step_somax" "$step_syn" "$step_optmem"
     applied_change_count=$((applied_change_count + 1))
+    # 本次写入要等下一轮复测通过才算保留；中断时由 tune_abort_cleanup 回滚。
+    PENDING_UNVERIFIED_TUNE=1
     if [ "$objective" = "retrans" ] && [ "$retr" -gt "$target_retr" ]; then
       ramp_rate="$(awk -v r="$ramp_rate" -v retr="$retr" -v target="$target_retr" 'BEGIN {
         factor = 0.92
@@ -2823,12 +2838,19 @@ restore_managed_file() {
   target_file="$(cat "$backup_dir/$label.path" 2>/dev/null || true)"
   existed="$(cat "$backup_dir/$label.existed" 2>/dev/null || true)"
   [ -n "$target_file" ] || return 1
-  if [ "$existed" = "1" ]; then
-    [ -f "$backup_dir/$label.original" ] || return 1
-    atomic_copy_file "$backup_dir/$label.original" "$target_file" || return 1
-  else
-    rm -f "$target_file" || return 1
-  fi
+  case "$existed" in
+    1)
+      [ -f "$backup_dir/$label.original" ] || return 1
+      atomic_copy_file "$backup_dir/$label.original" "$target_file" || return 1
+      ;;
+    0)
+      rm -f "$target_file" || return 1
+      ;;
+    *)
+      # 元数据缺失或损坏时拒绝恢复：不能把“不可信”当作“原本不存在”而删除现网文件。
+      return 1
+      ;;
+  esac
 }
 
 sysctl_key_allowed_for_platform() {
@@ -2851,7 +2873,8 @@ restore_runtime_values() {
     [ -n "$key" ] || continue
     sysctl -w "$key=$value" >/dev/null 2>&1 || transaction_failed=1
     actual="$(sysctl -n "$key" 2>/dev/null || true)"
-    [ "$(printf '%s' "$actual" | tr -s ' ')" = "$(printf '%s' "$value" | tr -s ' ')" ] || transaction_failed=1
+    # 内核对多值项（如 tcp_rmem）以制表符分隔输出，比较前统一压缩为单空格。
+    [ "$(printf '%s' "$actual" | tr -s '[:space:]' ' ')" = "$(printf '%s' "$value" | tr -s '[:space:]' ' ')" ] || transaction_failed=1
   done < "$values_file"
   [ "$transaction_failed" = "0" ]
 }
@@ -2895,7 +2918,8 @@ apply_sysctl_transaction() {
     value="$(printf '%s' "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     sysctl -w "$key=$value" >/dev/null 2>&1 || { transaction_failed=1; break; }
     actual="$(sysctl -n "$key" 2>/dev/null || true)"
-    [ "$(printf '%s' "$actual" | tr -s ' ')" = "$(printf '%s' "$value" | tr -s ' ')" ] || { transaction_failed=1; break; }
+    # 内核对多值项（如 tcp_rmem）以制表符分隔输出，比较前统一压缩为单空格。
+    [ "$(printf '%s' "$actual" | tr -s '[:space:]' ' ')" = "$(printf '%s' "$value" | tr -s '[:space:]' ' ')" ] || { transaction_failed=1; break; }
   done < "$filtered"
   if [ "$transaction_failed" != "0" ]; then
     restore_runtime_values "$live" >/dev/null 2>&1 || true
@@ -3443,7 +3467,14 @@ def token_valid(handler):
         supplied = auth[7:].strip() if auth.startswith("Bearer ") else ""
     if not supplied and ALLOW_QUERY_TOKEN:
         supplied = parse_qs(urlparse(handler.path).query).get("token", [""])[0]
-    return bool(supplied) and hmac.compare_digest(supplied, TOKEN)
+    if not supplied:
+        return False
+    # compare_digest 对含非 ASCII 的 str 会抛 TypeError（客户端可控输入），统一按字节比较。
+    try:
+        supplied_bytes = supplied.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(supplied_bytes, TOKEN.encode("utf-8"))
 
 
 def host_header_valid(handler):
@@ -3886,6 +3917,8 @@ listen_mode() {
     echo "[dry-run] 将启动 iperf3 server：0.0.0.0:$IPERF_PORT"
     echo "[dry-run] 会话 TTL：$SESSION_TTL 秒"
     print_client_commands "$peer_url" "$token"
+    # dry-run 不保留会话锁，否则后续真实 listen 会被永久阻塞。
+    rmdir "$lock_dir" 2>/dev/null || true
     return 0
   fi
 
@@ -4824,12 +4857,12 @@ client_menu() {
     fi
     ans="$PROMPT_REPLY"
     case "$ans" in
-      0) MENU_RETURNED="0"; preset_write_menu "$host" "$iperf_port" "$allow_same_public"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
-      1) MENU_RETURNED="0"; run_client_optimization "$host" "$iperf_port" "$allow_same_public"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
-      3) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
+      0) MENU_RETURNED="0"; preset_write_menu "$host" "$iperf_port" "$allow_same_public" || warn "预制参数流程未完成。"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
+      1) MENU_RETURNED="0"; run_client_optimization "$host" "$iperf_port" "$allow_same_public" || warn "自动优化流程未完成。"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
+      3) clear_screen; print_header "本机状态"; status_full || warn "读取本机状态失败。"; pause_for_enter ;;
       4) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
       5) clear_screen; print_header "过程记录"; render_agent_events_summary "$peer" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
-      a|A) MENU_RETURNED="0"; run_client_advanced_diagnosis "$host" "$iperf_port"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
+      a|A) MENU_RETURNED="0"; run_client_advanced_diagnosis "$host" "$iperf_port" || warn "高级诊断流程未完成。"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
       6)
         clear_screen
         print_header "回滚最近修改"
@@ -4842,8 +4875,8 @@ client_menu() {
         pause_for_enter
         ;;
       7) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
-      8) run_iperf3_speedtest "$host" "$iperf_port"; pause_for_enter ;;
-      9) restore_defaults_menu "$peer" "$token"; pause_for_enter ;;
+      8) run_iperf3_speedtest "$host" "$iperf_port" || warn "iperf3 测速未完成。"; pause_for_enter ;;
+      9) restore_defaults_menu "$peer" "$token" || warn "恢复默认值流程未完成。"; pause_for_enter ;;
       q|Q) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac
@@ -4897,7 +4930,7 @@ menu() {
     fi
     ans="$PROMPT_REPLY"
     case "$ans" in
-      1) listen_mode ;;
+      1) listen_mode || warn "服务端会话未正常结束。" ;;
       2)
         if ! prompt_read "请输入对端 Agent 地址，输入 0 返回：http://"; then pause_for_enter; continue; fi
         peer_host="$PROMPT_REPLY"
@@ -4905,12 +4938,17 @@ menu() {
         if ! prompt_read "请输入 token，输入 0 返回："; then pause_for_enter; continue; fi
         token="$PROMPT_REPLY"
         is_back_choice "$token" && continue
-        join_mode --peer "http://$peer_host" --token "$token" --iperf-port "$IPERF_PORT"
+        case "$peer_host" in
+          http://*|https://*) peer_url="$peer_host" ;;
+          *) peer_url="http://$peer_host" ;;
+        esac
+        join_mode --peer "$peer_url" --token "$token" --iperf-port "$IPERF_PORT" || warn "客户端会话未正常结束。"
         ;;
       3)
         if ! prompt_read "请输入 iperf3 对端主机，输入 0 返回："; then pause_for_enter; continue; fi
         host="$PROMPT_REPLY"
         is_back_choice "$host" && continue
+        if ! validate_host_value "$host"; then warn "主机格式非法或以 '-' 开头。"; pause_for_enter; continue; fi
         if ! prompt_read "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先 / 0 返回："; then pause_for_enter; continue; fi
         obj="$PROMPT_REPLY"
         is_back_choice "$obj" && continue
@@ -4920,9 +4958,9 @@ menu() {
           3) objective="startup" ;;
           *) warn "无效优化目标。"; pause_for_enter; continue ;;
         esac
-        auto_tune "$host" "$IPERF_PORT" "$objective" 0 5 1
+        auto_tune "$host" "$IPERF_PORT" "$objective" 0 5 1 || warn "自动优化流程未完成。"
         ;;
-      4) clear_screen; print_header "状态"; status_full; pause_for_enter ;;
+      4) clear_screen; print_header "状态"; status_full || warn "读取状态失败。"; pause_for_enter ;;
       5)
         if ! prompt_read "请输入本地带宽 Mbps，输入 0 返回："; then pause_for_enter; continue; fi
         local_mbps="$PROMPT_REPLY"
@@ -4949,7 +4987,7 @@ menu() {
         print_recommendation "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0
         if ! prompt_read "是否即时保存这组智能参数？[y/N] "; then save_ans=""; else save_ans="$PROMPT_REPLY"; fi
         case "$save_ans" in
-          y|Y) apply_smart "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0 ;;
+          y|Y) apply_smart "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0 || warn "智能参数保存未完成。" ;;
         esac
         pause_for_enter
         ;;
@@ -4962,10 +5000,10 @@ menu() {
         if ! prompt_read "请输入中文预设名或英文别名，输入 0 返回："; then pause_for_enter; continue; fi
         profile="$PROMPT_REPLY"
         is_back_choice "$profile" && continue
-        apply_profile "$profile"
+        apply_profile "$profile" || warn "预制参数写入未完成。"
         pause_for_enter
         ;;
-      7) clear_screen; print_header "回滚"; rollback_last; pause_for_enter ;;
+      7) clear_screen; print_header "回滚"; rollback_last || warn "回滚失败或没有可用备份。"; pause_for_enter ;;
       0) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac
@@ -5025,7 +5063,7 @@ main() {
   export ASSUME_YES DRY_RUN OUTPUT_MODE NON_INTERACTIVE NO_COLOR
   setup_colors
   trap 'stop_active_iperf_client; exit 130' INT TERM
-  trap 'stop_active_iperf_client >/dev/null 2>&1 || true' EXIT
+  trap 'tune_abort_cleanup; stop_active_iperf_client >/dev/null 2>&1 || true' EXIT
 
   cmd="${1:-menu}"
   if [ "$#" -gt 0 ]; then shift; fi

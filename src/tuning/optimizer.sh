@@ -1,4 +1,12 @@
 # Module: src/tuning/optimizer.sh
+# 中断/异常退出时回滚"已写入但未复测"的参数，兑现"仅保留经过复测的调整"承诺。
+tune_abort_cleanup() {
+  [ "${PENDING_UNVERIFIED_TUNE:-0}" = "1" ] || return 0
+  PENDING_UNVERIFIED_TUNE=0
+  warn "会话中断：正在回滚尚未复测的参数写入。"
+  rollback_last >/dev/null 2>&1 || true
+}
+
 current_max_buffers() {
   rmem="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 67108864)"
   wmem="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 67108864)"
@@ -213,6 +221,7 @@ auto_tune() {
     if [ "$sample_rc" != "0" ]; then
       if [ "$applied_change_count" -gt 0 ]; then
         rollback_last >/dev/null 2>&1 || true
+        PENDING_UNVERIFIED_TUNE=0
       fi
       if [ "$sample_rc" = "2" ]; then
         DIE_EXIT_CODE="$EXIT_BENCHMARK" die "测速离散度超过 ${TCP_TUNE_MAX_SPREAD_PERCENT}%，结果不稳定，已回滚本轮参数。"
@@ -290,6 +299,7 @@ EOF
     fi
 
     if [ "$applied_change_count" -gt 0 ] && [ -n "$previous_retr" ]; then
+      PENDING_UNVERIFIED_TUNE=0
       if objective_step_improved "$objective" "$previous_bps" "$bps" "$previous_retr" "$retr" "$previous_startup_bps" "$startup_bps" "$target_retr"; then
         ui_note "验证" "上一轮写入已让目标指标改善，保留本轮参数。"
       else
@@ -388,6 +398,8 @@ EOF
     IFS="$old_ifs"
     apply_buffers "$step_rmem" "$step_wmem" "$step_adv" "$step_notsent" "$step_backlog" "$step_somax" "$step_syn" "$step_optmem"
     applied_change_count=$((applied_change_count + 1))
+    # 本次写入要等下一轮复测通过才算保留；中断时由 tune_abort_cleanup 回滚。
+    PENDING_UNVERIFIED_TUNE=1
     if [ "$objective" = "retrans" ] && [ "$retr" -gt "$target_retr" ]; then
       ramp_rate="$(awk -v r="$ramp_rate" -v retr="$retr" -v target="$target_retr" 'BEGIN {
         factor = 0.92

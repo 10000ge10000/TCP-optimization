@@ -87,6 +87,32 @@ class AgentIntegrationTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/state")[0], 200)
         self.assertEqual(self.request("GET", f"/state?token={self.token}", token=False)[0], 403)
 
+    def test_missing_and_wrong_header_token_are_rejected(self):
+        self.assertEqual(self.request("GET", "/state", token=False)[0], 403)
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        connection.request("GET", "/state", headers={
+            "Host": f"127.0.0.1:{self.port}",
+            "X-TCP-Tune-Token": "b" * 64,
+        })
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        self.assertEqual(response.status, 403)
+
+    def test_non_ascii_token_is_rejected_not_crashed(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        connection.putrequest("GET", "/state", skip_host=True)
+        connection.putheader("Host", f"127.0.0.1:{self.port}")
+        # latin-1 头部注入非 ASCII 字节，历史实现会在 compare_digest 抛 TypeError。
+        connection.putheader("X-TCP-Tune-Token", "秘密令牌".encode("utf-8"))
+        connection.endheaders()
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        self.assertEqual(response.status, 403)
+        # Agent 必须仍然存活并能处理后续合法请求。
+        self.assertEqual(self.request("GET", "/state")[0], 200)
+
     def test_read_only_endpoints_remain_blocked(self):
         status, payload = self.request("POST", "/apply-buffers", {})
         self.assertEqual(status, 403)

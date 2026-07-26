@@ -339,15 +339,23 @@ function Get-RttMilliseconds {
       if ($null -ne $sample.ResponseTime) { [double]$sample.ResponseTime }
       elseif ($null -ne $sample.Latency) { [double]$sample.Latency }
     }
-    if ($values) { return [int](($values | Measure-Object -Average).Average) }
+    if ($values) { return [Nullable[Int32]][int](($values | Measure-Object -Average).Average) }
   } catch {
   }
-  return 0
+  # ICMP 被禁或探测失败时返回未知，不得当作 0ms 参与挡位判断。
+  return $null
+}
+
+function Format-RttText {
+  param([Nullable[Int32]]$RttMs)
+  if ($null -eq $RttMs) { return "未检测（ICMP 可能被禁）" }
+  return ("{0}ms" -f $RttMs)
 }
 
 function Select-PresetByProbe {
-  param([int]$RttMs, [Nullable[Int64]]$Retransmits, [double]$DownloadBitsPerSecond)
-  if ($RttMs -lt 30) { $index = 1 }
+  param([Nullable[Int32]]$RttMs, [Nullable[Int64]]$Retransmits, [double]$DownloadBitsPerSecond)
+  if ($null -eq $RttMs) { $index = 3 }
+  elseif ($RttMs -lt 30) { $index = 1 }
   elseif ($RttMs -lt 70) { $index = 2 }
   elseif ($RttMs -lt 130) { $index = 3 }
   elseif ($RttMs -lt 190) { $index = 4 }
@@ -384,15 +392,15 @@ function Invoke-AgentPost {
 }
 
 function Invoke-AgentGet {
-  param([string]$Url, [string]$TokenValue)
+  param([string]$Url, [string]$TokenValue, [int]$TimeoutSec = 30)
   if (-not $TokenValue -or $TokenValue.Length -gt 256 -or $TokenValue -match '[\r\n]') { throw "Agent token 无效。" }
-  Invoke-RestMethod -Method Get -Uri $Url -Headers @{ "X-TCP-Tune-Token" = $TokenValue } -TimeoutSec 30
+  Invoke-RestMethod -Method Get -Uri $Url -Headers @{ "X-TCP-Tune-Token" = $TokenValue } -TimeoutSec $TimeoutSec
 }
 
 function Test-RemoteDefaultsAvailable {
   param([string]$PeerUrl, [string]$TokenValue)
   try {
-    $data = Invoke-AgentGet -Url "$PeerUrl/defaults" -TokenValue $TokenValue
+    $data = Invoke-AgentGet -Url "$PeerUrl/defaults" -TokenValue $TokenValue -TimeoutSec 5
     return [bool]$data.available
   } catch {
     return $false
@@ -401,8 +409,12 @@ function Test-RemoteDefaultsAvailable {
 
 function Get-DefaultsMenuTag {
   param([string]$PeerUrl, [string]$TokenValue)
-  $remote = if (Test-RemoteDefaultsAvailable -PeerUrl $PeerUrl -TokenValue $TokenValue) { "服务端已记录" } else { "服务端未知" }
-  return "[本机不适用 / $remote]"
+  # 每次重绘菜单都探测会在服务端无响应时反复卡住；本会话只探测一次。
+  if ($null -eq $script:DefaultsMenuTagCache) {
+    $remote = if (Test-RemoteDefaultsAvailable -PeerUrl $PeerUrl -TokenValue $TokenValue) { "服务端已记录" } else { "服务端未知" }
+    $script:DefaultsMenuTagCache = "[本机不适用 / $remote]"
+  }
+  return $script:DefaultsMenuTagCache
 }
 
 function Get-PeerHost {
@@ -693,7 +705,10 @@ function Invoke-WindowsPresetAssessment {
   Write-Header "预制参数评估"
   Write-Section "检测结果"
   Write-PanelRow "本机地址" $LocalAddress
-  Write-PanelRow "RTT" ("{0}ms" -f $rtt)
+  Write-PanelRow "RTT" (Format-RttText -RttMs $rtt)
+  if ($null -eq $rtt) {
+    Write-Note "RTT" "无法测得 RTT，挡位推荐按中距均衡给出，请结合实际链路距离人工确认。"
+  }
   Write-PanelRow "上传" ("{0} / 重传 {1} / 首秒 {2}" -f (Format-Rate $upload.BitsPerSecond), (Format-Retransmits $upload.Retransmits), (Format-Rate $upload.FirstSecondBitsPerSecond))
   Write-PanelRow "下载" ("{0} / 重传 {1} / 首秒 {2}" -f (Format-Rate $download.BitsPerSecond), (Format-Retransmits $download.Retransmits), (Format-Rate $download.FirstSecondBitsPerSecond))
   Write-Host ""
@@ -962,16 +977,43 @@ function Invoke-ClientMenu {
     Write-MenuItem "7" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
     Write-MenuItem "q" "退出客户端" "不停止服务端会话" "DarkGray"
     $choice = Read-Host "请选择"
+    # 单次操作失败（网络抖动、iperf3 异常等）只提示并返回菜单，不终止整个客户端会话。
     switch ($choice) {
-      "0" { if (Invoke-WindowsPresetAssessment -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
-      "1" { if (Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
+      "0" {
+        try { if (Invoke-WindowsPresetAssessment -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
+        catch { Write-Host "预制参数评估失败：$($_.Exception.Message)" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
+      }
+      "1" {
+        try { if (Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
+        catch { Write-Host "稳定自动优化失败：$($_.Exception.Message)" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
+      }
       "3" { & $PSCommandPath status; Read-Host "按回车返回主菜单" | Out-Null }
-      "4" { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回主菜单" | Out-Null }
-      "5" { Show-AgentEventSummary -PeerUrl $PeerUrl -TokenValue $TokenValue; Read-Host "按回车返回主菜单" | Out-Null }
+      "4" {
+        try { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8 }
+        catch { Write-Host "读取服务端状态失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        Read-Host "按回车返回主菜单" | Out-Null
+      }
+      "5" {
+        try { Show-AgentEventSummary -PeerUrl $PeerUrl -TokenValue $TokenValue }
+        catch { Write-Host "读取过程记录失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        Read-Host "按回车返回主菜单" | Out-Null
+      }
       "6" { Write-Host "Windows 端默认没有自动写入 TCP 参数，无需回滚。" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
-      "7" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
-      "8" { Invoke-Iperf3Speedtest -HostName $HostName -Port $Port; Read-Host "按回车返回主菜单" | Out-Null }
-      "9" { Invoke-RestoreDefaultsMenu -PeerUrl $PeerUrl -TokenValue $TokenValue | Out-Null; Read-Host "按回车返回主菜单" | Out-Null }
+      "7" {
+        try { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null }
+        catch { Write-Host "停止请求发送失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        return
+      }
+      "8" {
+        try { Invoke-Iperf3Speedtest -HostName $HostName -Port $Port }
+        catch { Write-Host "iperf3 测速失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        Read-Host "按回车返回主菜单" | Out-Null
+      }
+      "9" {
+        try { Invoke-RestoreDefaultsMenu -PeerUrl $PeerUrl -TokenValue $TokenValue | Out-Null }
+        catch { Write-Host "恢复默认值请求失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        Read-Host "按回车返回主菜单" | Out-Null
+      }
       "q" { return }
       "Q" { return }
       default { Write-Host "无效选择。" -ForegroundColor Yellow }

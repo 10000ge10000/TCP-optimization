@@ -45,6 +45,8 @@ listen_mode() {
     echo "[dry-run] 将启动 iperf3 server：0.0.0.0:$IPERF_PORT"
     echo "[dry-run] 会话 TTL：$SESSION_TTL 秒"
     print_client_commands "$peer_url" "$token"
+    # dry-run 不保留会话锁，否则后续真实 listen 会被永久阻塞。
+    rmdir "$lock_dir" 2>/dev/null || true
     return 0
   fi
 

@@ -93,7 +93,12 @@ cat > "$temp_dir/bin/sysctl" <<'MOCK'
 state=${FAKE_SYSCTL_STATE:?}
 case "$1" in
   -n)
-    awk -F= -v key="$2" '$1==key {sub(/^[^=]*=/,""); print; found=1} END {exit !found}' "$state"
+    if [ "${FAKE_TAB_KEY:-}" = "$2" ]; then
+      # 模拟内核对多值项的读回格式：字段间使用制表符分隔。
+      awk -F= -v key="$2" '$1==key {sub(/^[^=]*=/,""); gsub(/ /,"\t"); print; found=1} END {exit !found}' "$state"
+    else
+      awk -F= -v key="$2" '$1==key {sub(/^[^=]*=/,""); print; found=1} END {exit !found}' "$state"
+    fi
     ;;
   -w)
     pair=$2; key=${pair%%=*}; value=${pair#*=}
@@ -150,10 +155,39 @@ if apply_sysctl_transaction "$temp_dir/managed.conf" "$temp_dir/candidate.conf" 
 else
   check_equal "transaction partial failure restored live value" 65536 "$(awk -F= '$1=="net.ipv4.tcp_notsent_lowat"{print $2}' "$temp_dir/state")"
 fi
+unset FAKE_FAIL_KEY 2>/dev/null || true
+
+# 多值键（tcp_rmem 等）内核读回使用制表符分隔，写后校验必须归一化空白后再比较。
+mkdir -p "$temp_dir/tabbed"
+printf '%s\n' 'net.ipv4.tcp_rmem=4096 131072 6291456' > "$temp_dir/state"
+printf '%s\n' 'net.ipv4.tcp_rmem = 4096 87380 8388608' > "$temp_dir/tabbed-candidate.conf"
+FAKE_TAB_KEY=net.ipv4.tcp_rmem; export FAKE_TAB_KEY
+if apply_sysctl_transaction "$temp_dir/managed.conf" "$temp_dir/tabbed-candidate.conf" "$temp_dir/tabbed" tabbed-target; then
+  check_equal "multi-value key survives tab-separated readback" '4096 87380 8388608' "$(awk -F= '$1=="net.ipv4.tcp_rmem"{print $2}' "$temp_dir/state")"
+else
+  failed=$((failed + 1)); printf 'not ok - multi-value key rejected by tab-separated readback\n' >&2
+fi
+unset FAKE_TAB_KEY
+
+# 备份元数据损坏时必须拒绝恢复，而不是把目标文件当作“原本不存在”删除。
+mkdir -p "$temp_dir/corrupt"
+printf '%s\n' 'live content' > "$temp_dir/live.conf"
+printf '%s\n' "$temp_dir/live.conf" > "$temp_dir/corrupt/broken.path"
+: > "$temp_dir/corrupt/broken.existed"
+if restore_managed_file "$temp_dir/corrupt" broken 2>/dev/null; then
+  failed=$((failed + 1)); printf 'not ok - corrupt backup metadata was accepted\n' >&2
+else
+  if [ -f "$temp_dir/live.conf" ]; then
+    passed=$((passed + 1)); printf 'ok - corrupt backup metadata refuses restore and keeps target\n'
+  else
+    failed=$((failed + 1)); printf 'not ok - corrupt backup metadata deleted target file\n' >&2
+  fi
+fi
 PATH=$old_path; export PATH
 rm -f "$temp_dir/bin/sysctl" "$temp_dir/state" "$temp_dir/managed.conf" "$temp_dir/candidate.conf" "$temp_dir/rollback-values.conf"
-rm -f "$temp_dir/backup"/* "$temp_dir/failure"/* "$temp_dir/mismatch"/* "$temp_dir/mismatch.once"
-rmdir "$temp_dir/bin" "$temp_dir/backup" "$temp_dir/failure" "$temp_dir/mismatch" "$temp_dir"
+rm -f "$temp_dir/tabbed-candidate.conf" "$temp_dir/live.conf"
+rm -f "$temp_dir/backup"/* "$temp_dir/failure"/* "$temp_dir/mismatch"/* "$temp_dir/tabbed"/* "$temp_dir/corrupt"/* "$temp_dir/mismatch.once"
+rmdir "$temp_dir/bin" "$temp_dir/backup" "$temp_dir/failure" "$temp_dir/mismatch" "$temp_dir/tabbed" "$temp_dir/corrupt" "$temp_dir"
 
 # 平台诊断状态必须区分“不支持”“执行失败”和“未检测到”。这些覆盖函数放在
 # 测试末尾，避免影响前面的事务测试。
@@ -226,6 +260,13 @@ if printf '%s\n' "$compact_p4" | extract_bps >/dev/null 2>&1; then
 else
   passed=$((passed + 1)); printf 'ok - awk rejects compact P4 JSON\n'
 fi
+# 真实 fixture 含 stream 级数值 "end"/"start" 字段，曾使 awk 状态机提前切换、first 永远缺失。
+# 期望值按 awk 后端的 %.0f 取整（与 python 后端的 int() 截断可能相差 1 bps）。
+real_p1_fixture="$ROOT_DIR/tests/fixtures/iperf3/iperf-3.17.1-ipv6-upload-p1.json"
+check_equal "awk real fixture receiver throughput" 64288432 "$(extract_bps < "$real_p1_fixture")"
+check_equal "awk real fixture first interval" 248227048 "$(extract_first_interval_bps < "$real_p1_fixture")"
+real_dl_fixture="$ROOT_DIR/tests/fixtures/iperf3/iperf-3.17.1-ipv4-download-p1.json"
+check_equal "awk real download fixture first interval" 569197499 "$(extract_first_interval_bps < "$real_dl_fixture")"
 check_equal "missing parser metric remains unknown" unknown "$(printf '%s\n' '{"end":{}}' | iperf_metric_or_unknown bps)"
 check_equal "unknown rate remains unknown" unknown "$(format_rate unknown)"
 

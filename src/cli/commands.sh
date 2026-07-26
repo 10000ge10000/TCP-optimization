@@ -42,7 +42,7 @@ menu() {
     fi
     ans="$PROMPT_REPLY"
     case "$ans" in
-      1) listen_mode ;;
+      1) listen_mode || warn "服务端会话未正常结束。" ;;
       2)
         if ! prompt_read "请输入对端 Agent 地址，输入 0 返回：http://"; then pause_for_enter; continue; fi
         peer_host="$PROMPT_REPLY"
@@ -50,12 +50,17 @@ menu() {
         if ! prompt_read "请输入 token，输入 0 返回："; then pause_for_enter; continue; fi
         token="$PROMPT_REPLY"
         is_back_choice "$token" && continue
-        join_mode --peer "http://$peer_host" --token "$token" --iperf-port "$IPERF_PORT"
+        case "$peer_host" in
+          http://*|https://*) peer_url="$peer_host" ;;
+          *) peer_url="http://$peer_host" ;;
+        esac
+        join_mode --peer "$peer_url" --token "$token" --iperf-port "$IPERF_PORT" || warn "客户端会话未正常结束。"
         ;;
       3)
         if ! prompt_read "请输入 iperf3 对端主机，输入 0 返回："; then pause_for_enter; continue; fi
         host="$PROMPT_REPLY"
         is_back_choice "$host" && continue
+        if ! validate_host_value "$host"; then warn "主机格式非法或以 '-' 开头。"; pause_for_enter; continue; fi
         if ! prompt_read "目标：1 重传优先 / 2 速率优先 / 3 启动速度优先 / 0 返回："; then pause_for_enter; continue; fi
         obj="$PROMPT_REPLY"
         is_back_choice "$obj" && continue
@@ -65,9 +70,9 @@ menu() {
           3) objective="startup" ;;
           *) warn "无效优化目标。"; pause_for_enter; continue ;;
         esac
-        auto_tune "$host" "$IPERF_PORT" "$objective" 0 5 1
+        auto_tune "$host" "$IPERF_PORT" "$objective" 0 5 1 || warn "自动优化流程未完成。"
         ;;
-      4) clear_screen; print_header "状态"; status_full; pause_for_enter ;;
+      4) clear_screen; print_header "状态"; status_full || warn "读取状态失败。"; pause_for_enter ;;
       5)
         if ! prompt_read "请输入本地带宽 Mbps，输入 0 返回："; then pause_for_enter; continue; fi
         local_mbps="$PROMPT_REPLY"
@@ -94,7 +99,7 @@ menu() {
         print_recommendation "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0
         if ! prompt_read "是否即时保存这组智能参数？[y/N] "; then save_ans=""; else save_ans="$PROMPT_REPLY"; fi
         case "$save_ans" in
-          y|Y) apply_smart "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0 ;;
+          y|Y) apply_smart "$local_mbps" "$peer_mbps" "$rtt_ms" "$mem_input" "$objective" 0.79 0 || warn "智能参数保存未完成。" ;;
         esac
         pause_for_enter
         ;;
@@ -107,10 +112,10 @@ menu() {
         if ! prompt_read "请输入中文预设名或英文别名，输入 0 返回："; then pause_for_enter; continue; fi
         profile="$PROMPT_REPLY"
         is_back_choice "$profile" && continue
-        apply_profile "$profile"
+        apply_profile "$profile" || warn "预制参数写入未完成。"
         pause_for_enter
         ;;
-      7) clear_screen; print_header "回滚"; rollback_last; pause_for_enter ;;
+      7) clear_screen; print_header "回滚"; rollback_last || warn "回滚失败或没有可用备份。"; pause_for_enter ;;
       0) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac

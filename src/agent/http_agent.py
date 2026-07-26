@@ -69,7 +69,14 @@ def token_valid(handler):
         supplied = auth[7:].strip() if auth.startswith("Bearer ") else ""
     if not supplied and ALLOW_QUERY_TOKEN:
         supplied = parse_qs(urlparse(handler.path).query).get("token", [""])[0]
-    return bool(supplied) and hmac.compare_digest(supplied, TOKEN)
+    if not supplied:
+        return False
+    # compare_digest 对含非 ASCII 的 str 会抛 TypeError（客户端可控输入），统一按字节比较。
+    try:
+        supplied_bytes = supplied.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(supplied_bytes, TOKEN.encode("utf-8"))
 
 
 def host_header_valid(handler):

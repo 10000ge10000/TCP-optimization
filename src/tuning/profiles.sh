@@ -201,7 +201,8 @@ recommend_values() {
       }
 
       min_bw = local < peer ? local : peer
-      base_bdp = ceil((min_bw * 1024 * 1024 / 8) * rtt / 1000)
+      # Mbps 使用 SI 单位（1 Mbps = 10^6 bit/s），不能按 2^20 计算。
+      base_bdp = ceil((min_bw * 1000 * 1000 / 8) * rtt / 1000)
       if (base_bdp < 16384) base_bdp = 16384
 
       mem_bytes = mem * 1024 * 1024

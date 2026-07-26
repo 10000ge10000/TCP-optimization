@@ -79,14 +79,15 @@ iperf_awk_field() {
   field="$1"
   awk -v wanted="$field" '
     NR == 1 && $0 ~ /[{].*[}]/ { compact=1 }
-    /"intervals"[[:space:]]*:/ { in_intervals=1 }
-    in_intervals && /"sum"[[:space:]]*:/ && first_bps=="" { interval_sum=1; next }
+    # 状态切换只认对象/数组开括号：stream 里的数值字段 "end": 1.000315 不得改变解析状态。
+    /"intervals"[[:space:]]*:[[:space:]]*\[/ { in_intervals=1; in_end=0 }
+    in_intervals && /"sum"[[:space:]]*:[[:space:]]*[{]/ && first_bps=="" { interval_sum=1; next }
     interval_sum && /"bits_per_second"[[:space:]]*:/ {
       line=$0; sub(/^.*"bits_per_second"[[:space:]]*:[[:space:]]*/, "", line); sub(/[^0-9.eE+-].*$/, "", line)
       if (line ~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/) first_bps=line
       interval_sum=0
     }
-    /"end"[[:space:]]*:/ { in_end=1; in_intervals=0 }
+    /"end"[[:space:]]*:[[:space:]]*[{]/ { in_end=1; in_intervals=0 }
     in_end && /"sum_received"[[:space:]]*:/ { block="received"; next }
     in_end && /"sum_sent"[[:space:]]*:/ { block="sent"; next }
     in_end && /"sum"[[:space:]]*:/ { block="sum"; next }

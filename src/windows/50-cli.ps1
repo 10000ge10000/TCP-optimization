@@ -27,7 +27,10 @@
   Write-Header "预制参数评估"
   Write-Section "检测结果"
   Write-PanelRow "本机地址" $LocalAddress
-  Write-PanelRow "RTT" ("{0}ms" -f $rtt)
+  Write-PanelRow "RTT" (Format-RttText -RttMs $rtt)
+  if ($null -eq $rtt) {
+    Write-Note "RTT" "无法测得 RTT，挡位推荐按中距均衡给出，请结合实际链路距离人工确认。"
+  }
   Write-PanelRow "上传" ("{0} / 重传 {1} / 首秒 {2}" -f (Format-Rate $upload.BitsPerSecond), (Format-Retransmits $upload.Retransmits), (Format-Rate $upload.FirstSecondBitsPerSecond))
   Write-PanelRow "下载" ("{0} / 重传 {1} / 首秒 {2}" -f (Format-Rate $download.BitsPerSecond), (Format-Retransmits $download.Retransmits), (Format-Rate $download.FirstSecondBitsPerSecond))
   Write-Host ""
@@ -296,16 +299,43 @@ function Invoke-ClientMenu {
     Write-MenuItem "7" "停止会话并退出" "清理 Agent / iperf3" "Yellow"
     Write-MenuItem "q" "退出客户端" "不停止服务端会话" "DarkGray"
     $choice = Read-Host "请选择"
+    # 单次操作失败（网络抖动、iperf3 异常等）只提示并返回菜单，不终止整个客户端会话。
     switch ($choice) {
-      "0" { if (Invoke-WindowsPresetAssessment -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
-      "1" { if (Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
+      "0" {
+        try { if (Invoke-WindowsPresetAssessment -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
+        catch { Write-Host "预制参数评估失败：$($_.Exception.Message)" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
+      }
+      "1" {
+        try { if (Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
+        catch { Write-Host "稳定自动优化失败：$($_.Exception.Message)" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
+      }
       "3" { & $PSCommandPath status; Read-Host "按回车返回主菜单" | Out-Null }
-      "4" { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回主菜单" | Out-Null }
-      "5" { Show-AgentEventSummary -PeerUrl $PeerUrl -TokenValue $TokenValue; Read-Host "按回车返回主菜单" | Out-Null }
+      "4" {
+        try { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8 }
+        catch { Write-Host "读取服务端状态失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        Read-Host "按回车返回主菜单" | Out-Null
+      }
+      "5" {
+        try { Show-AgentEventSummary -PeerUrl $PeerUrl -TokenValue $TokenValue }
+        catch { Write-Host "读取过程记录失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        Read-Host "按回车返回主菜单" | Out-Null
+      }
       "6" { Write-Host "Windows 端默认没有自动写入 TCP 参数，无需回滚。" -ForegroundColor Yellow; Read-Host "按回车返回主菜单" | Out-Null }
-      "7" { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null; return }
-      "8" { Invoke-Iperf3Speedtest -HostName $HostName -Port $Port; Read-Host "按回车返回主菜单" | Out-Null }
-      "9" { Invoke-RestoreDefaultsMenu -PeerUrl $PeerUrl -TokenValue $TokenValue | Out-Null; Read-Host "按回车返回主菜单" | Out-Null }
+      "7" {
+        try { Invoke-AgentPost -Url "$PeerUrl/stop" -TokenValue $TokenValue -Body ([pscustomobject]@{}) | Out-Null }
+        catch { Write-Host "停止请求发送失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        return
+      }
+      "8" {
+        try { Invoke-Iperf3Speedtest -HostName $HostName -Port $Port }
+        catch { Write-Host "iperf3 测速失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        Read-Host "按回车返回主菜单" | Out-Null
+      }
+      "9" {
+        try { Invoke-RestoreDefaultsMenu -PeerUrl $PeerUrl -TokenValue $TokenValue | Out-Null }
+        catch { Write-Host "恢复默认值请求失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+        Read-Host "按回车返回主菜单" | Out-Null
+      }
       "q" { return }
       "Q" { return }
       default { Write-Host "无效选择。" -ForegroundColor Yellow }

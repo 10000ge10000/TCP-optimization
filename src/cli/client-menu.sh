@@ -353,12 +353,12 @@ client_menu() {
     fi
     ans="$PROMPT_REPLY"
     case "$ans" in
-      0) MENU_RETURNED="0"; preset_write_menu "$host" "$iperf_port" "$allow_same_public"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
-      1) MENU_RETURNED="0"; run_client_optimization "$host" "$iperf_port" "$allow_same_public"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
-      3) clear_screen; print_header "本机状态"; status_full; pause_for_enter ;;
+      0) MENU_RETURNED="0"; preset_write_menu "$host" "$iperf_port" "$allow_same_public" || warn "预制参数流程未完成。"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
+      1) MENU_RETURNED="0"; run_client_optimization "$host" "$iperf_port" "$allow_same_public" || warn "自动优化流程未完成。"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
+      3) clear_screen; print_header "本机状态"; status_full || warn "读取本机状态失败。"; pause_for_enter ;;
       4) clear_screen; print_header "服务端状态"; get_agent_json "$peer/status" "$token" || warn "读取服务端状态失败。"; pause_for_enter ;;
       5) clear_screen; print_header "过程记录"; render_agent_events_summary "$peer" "$token" || warn "读取服务端事件失败。"; pause_for_enter ;;
-      a|A) MENU_RETURNED="0"; run_client_advanced_diagnosis "$host" "$iperf_port"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
+      a|A) MENU_RETURNED="0"; run_client_advanced_diagnosis "$host" "$iperf_port" || warn "高级诊断流程未完成。"; [ "$MENU_RETURNED" = "1" ] || pause_for_enter ;;
       6)
         clear_screen
         print_header "回滚最近修改"
@@ -371,8 +371,8 @@ client_menu() {
         pause_for_enter
         ;;
       7) post_json "$peer/stop" "$token" "{}" || true; exit 0 ;;
-      8) run_iperf3_speedtest "$host" "$iperf_port"; pause_for_enter ;;
-      9) restore_defaults_menu "$peer" "$token"; pause_for_enter ;;
+      8) run_iperf3_speedtest "$host" "$iperf_port" || warn "iperf3 测速未完成。"; pause_for_enter ;;
+      9) restore_defaults_menu "$peer" "$token" || warn "恢复默认值流程未完成。"; pause_for_enter ;;
       q|Q) exit 0 ;;
       *) warn "无效选择。"; pause_for_enter ;;
     esac

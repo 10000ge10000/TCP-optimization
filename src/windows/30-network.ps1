@@ -16,15 +16,23 @@ function Get-RttMilliseconds {
       if ($null -ne $sample.ResponseTime) { [double]$sample.ResponseTime }
       elseif ($null -ne $sample.Latency) { [double]$sample.Latency }
     }
-    if ($values) { return [int](($values | Measure-Object -Average).Average) }
+    if ($values) { return [Nullable[Int32]][int](($values | Measure-Object -Average).Average) }
   } catch {
   }
-  return 0
+  # ICMP 被禁或探测失败时返回未知，不得当作 0ms 参与挡位判断。
+  return $null
+}
+
+function Format-RttText {
+  param([Nullable[Int32]]$RttMs)
+  if ($null -eq $RttMs) { return "未检测（ICMP 可能被禁）" }
+  return ("{0}ms" -f $RttMs)
 }
 
 function Select-PresetByProbe {
-  param([int]$RttMs, [Nullable[Int64]]$Retransmits, [double]$DownloadBitsPerSecond)
-  if ($RttMs -lt 30) { $index = 1 }
+  param([Nullable[Int32]]$RttMs, [Nullable[Int64]]$Retransmits, [double]$DownloadBitsPerSecond)
+  if ($null -eq $RttMs) { $index = 3 }
+  elseif ($RttMs -lt 30) { $index = 1 }
   elseif ($RttMs -lt 70) { $index = 2 }
   elseif ($RttMs -lt 130) { $index = 3 }
   elseif ($RttMs -lt 190) { $index = 4 }
@@ -61,15 +69,15 @@ function Invoke-AgentPost {
 }
 
 function Invoke-AgentGet {
-  param([string]$Url, [string]$TokenValue)
+  param([string]$Url, [string]$TokenValue, [int]$TimeoutSec = 30)
   if (-not $TokenValue -or $TokenValue.Length -gt 256 -or $TokenValue -match '[\r\n]') { throw "Agent token 无效。" }
-  Invoke-RestMethod -Method Get -Uri $Url -Headers @{ "X-TCP-Tune-Token" = $TokenValue } -TimeoutSec 30
+  Invoke-RestMethod -Method Get -Uri $Url -Headers @{ "X-TCP-Tune-Token" = $TokenValue } -TimeoutSec $TimeoutSec
 }
 
 function Test-RemoteDefaultsAvailable {
   param([string]$PeerUrl, [string]$TokenValue)
   try {
-    $data = Invoke-AgentGet -Url "$PeerUrl/defaults" -TokenValue $TokenValue
+    $data = Invoke-AgentGet -Url "$PeerUrl/defaults" -TokenValue $TokenValue -TimeoutSec 5
     return [bool]$data.available
   } catch {
     return $false
@@ -78,8 +86,12 @@ function Test-RemoteDefaultsAvailable {
 
 function Get-DefaultsMenuTag {
   param([string]$PeerUrl, [string]$TokenValue)
-  $remote = if (Test-RemoteDefaultsAvailable -PeerUrl $PeerUrl -TokenValue $TokenValue) { "服务端已记录" } else { "服务端未知" }
-  return "[本机不适用 / $remote]"
+  # 每次重绘菜单都探测会在服务端无响应时反复卡住；本会话只探测一次。
+  if ($null -eq $script:DefaultsMenuTagCache) {
+    $remote = if (Test-RemoteDefaultsAvailable -PeerUrl $PeerUrl -TokenValue $TokenValue) { "服务端已记录" } else { "服务端未知" }
+    $script:DefaultsMenuTagCache = "[本机不适用 / $remote]"
+  }
+  return $script:DefaultsMenuTagCache
 }
 
 function Get-PeerHost {

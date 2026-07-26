@@ -18,12 +18,19 @@ restore_managed_file() {
   target_file="$(cat "$backup_dir/$label.path" 2>/dev/null || true)"
   existed="$(cat "$backup_dir/$label.existed" 2>/dev/null || true)"
   [ -n "$target_file" ] || return 1
-  if [ "$existed" = "1" ]; then
-    [ -f "$backup_dir/$label.original" ] || return 1
-    atomic_copy_file "$backup_dir/$label.original" "$target_file" || return 1
-  else
-    rm -f "$target_file" || return 1
-  fi
+  case "$existed" in
+    1)
+      [ -f "$backup_dir/$label.original" ] || return 1
+      atomic_copy_file "$backup_dir/$label.original" "$target_file" || return 1
+      ;;
+    0)
+      rm -f "$target_file" || return 1
+      ;;
+    *)
+      # 元数据缺失或损坏时拒绝恢复：不能把“不可信”当作“原本不存在”而删除现网文件。
+      return 1
+      ;;
+  esac
 }
 
 sysctl_key_allowed_for_platform() {
@@ -46,7 +53,8 @@ restore_runtime_values() {
     [ -n "$key" ] || continue
     sysctl -w "$key=$value" >/dev/null 2>&1 || transaction_failed=1
     actual="$(sysctl -n "$key" 2>/dev/null || true)"
-    [ "$(printf '%s' "$actual" | tr -s ' ')" = "$(printf '%s' "$value" | tr -s ' ')" ] || transaction_failed=1
+    # 内核对多值项（如 tcp_rmem）以制表符分隔输出，比较前统一压缩为单空格。
+    [ "$(printf '%s' "$actual" | tr -s '[:space:]' ' ')" = "$(printf '%s' "$value" | tr -s '[:space:]' ' ')" ] || transaction_failed=1
   done < "$values_file"
   [ "$transaction_failed" = "0" ]
 }
@@ -90,7 +98,8 @@ apply_sysctl_transaction() {
     value="$(printf '%s' "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     sysctl -w "$key=$value" >/dev/null 2>&1 || { transaction_failed=1; break; }
     actual="$(sysctl -n "$key" 2>/dev/null || true)"
-    [ "$(printf '%s' "$actual" | tr -s ' ')" = "$(printf '%s' "$value" | tr -s ' ')" ] || { transaction_failed=1; break; }
+    # 内核对多值项（如 tcp_rmem）以制表符分隔输出，比较前统一压缩为单空格。
+    [ "$(printf '%s' "$actual" | tr -s '[:space:]' ' ')" = "$(printf '%s' "$value" | tr -s '[:space:]' ' ')" ] || { transaction_failed=1; break; }
   done < "$filtered"
   if [ "$transaction_failed" != "0" ]; then
     restore_runtime_values "$live" >/dev/null 2>&1 || true
