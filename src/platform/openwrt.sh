@@ -29,7 +29,7 @@ apply_openwrt_minimal_values() {
   need_root
   validate_bool_number "$mtu_probing" || die "非法 tcp_mtu_probing：$mtu_probing"
   validate_bool_number "$slow_start" || die "非法 tcp_slow_start_after_idle：$slow_start"
-  validate_positive_int_range "$notsent_lowat" 16384 "$(ai_max_notsent)" || die "非法 tcp_notsent_lowat：$notsent_lowat"
+  validate_positive_int_range "$notsent_lowat" 16384 "$(max_notsent_lowat)" || die "非法 tcp_notsent_lowat：$notsent_lowat"
   validate_positive_int_range "$limit_output" 131072 4194304 || die "非法 tcp_limit_output_bytes：$limit_output"
 
   if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -51,7 +51,6 @@ EOF
     restore_manual_backup "$backup_dir" >/dev/null 2>&1 || true
     DIE_EXIT_CODE="$EXIT_APPLY" die "OpenWrt 最小参数事务加载或验证失败，已回滚；备份目录：$backup_dir"
   fi
-  LAST_MANUAL_BACKUP="$backup_dir"
   info "OpenWrt 最小参数已保存并加载：$OPENWRT_MINIMAL_FILE"
   info "备份目录：$backup_dir"
 }

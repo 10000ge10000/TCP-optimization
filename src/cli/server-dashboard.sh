@@ -223,7 +223,6 @@ else:
         "preset-apply": "预制参数写入",
         "rollback": "回滚",
         "auto": "稳定自动优化",
-        "ai": "AI 智能优化",
     }.get(str(payload.get("stage") or ""), str(payload.get("stage") or "任务"))
     result_name = {
         "running": "进行中",
@@ -330,7 +329,6 @@ if latest_stage:
         "preset-apply": "预制写入",
         "rollback": "回滚中",
         "auto": "稳定优化",
-        "ai": "AI 优化",
     }
     result_map = {
         "running": "进行中",

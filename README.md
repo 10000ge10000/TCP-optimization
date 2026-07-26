@@ -11,7 +11,7 @@ TCP-optimization 是一个双端 TCP 调优脚本，用来在 VPS 和客户端�
 
 - 服务端默认只负责监听、测速和展示状态；“恢复默认值”只会恢复服务端启动时记录的首次快照。
 - 客户端负责本机优化，例如 OpenWrt、Linux、macOS、Windows。
-- 服务端需要 Python3；OpenWrt 客户端不强制安装 Python，AI 功能可通过 curl 调用公共 AI 网关。
+- 服务端需要 Python3；OpenWrt 客户端不强制安装 Python。
 - 所有修改都有备份，退出时会清理临时 Agent 和 iperf3。
 
 <table>
@@ -34,7 +34,6 @@ TCP-optimization 是一个双端 TCP 调优脚本，用来在 VPS 和客户端�
 - 受控基础项：可用的 BBR 与 FQ/fq_codel 只作为事务候选，必须经过备份、加载验证和复测后才保留。
 - 预制参数：按 RTT 和链路距离提供五档 TCP 参数，写入前会先检测并推荐。
 - 三种确定性优化：重传优先、吞吐优先、快速起速。
-- AI 智能调参：AI 只返回结构化建议，脚本按白名单和数值边界执行。
 - 高级链路诊断：只读采集角色、协议、PMTU、qdisc drop/backlog、P1/P4 对比，不默认写 MTU/TC。
 - OpenWrt 轻量支持：OpenWrt 端不要求 python3。
 - 安全清理：Ctrl+C 或菜单停止会清理本工具创建的 Agent/iperf3。
@@ -86,8 +85,7 @@ Windows 无 winget/choco/scoop 时，脚本会把 iperf3 下载到用户缓存�
 
 ```text
 [0] 预制参数写入      先检测双端基础信息，再推荐五档参数
-[1] 稳定自动优化      不用 AI，规则固定，自动测速迭代
-[2] AI 智能优化       AI 给建议，脚本按白名单执行
+[1] 稳定自动优化      规则固定，自动测速迭代
 [3] 查看本机状态      系统 / TCP 参数
 [4] 查看服务端状态    会话 / 测速服务
 [5] 查看过程记录      中文摘要日志
@@ -125,8 +123,6 @@ sudo sh tcp-tune.sh apply-profile 中距均衡
 | 重传优先 | 游戏、语音、远程桌面 | 尽量压低重传 |
 | 吞吐优先 | 下载、备份、大文件 | 提升稳定传输速度 |
 | 快速起速 | 网页、小文件、短连接 | 缩短连接初期提速时间 |
-
-AI 智能调参里的默认模式也是“快速起速”，不是均衡模式。
 
 ## 高级诊断依据
 
@@ -173,27 +169,6 @@ BBR/qdisc 仅在内核明确支持时作为基础能力处理，并且同样走�
 防火墙 / WAN / LAN / DNS / DHCP / PPPoE / 代理服务 / OpenClash / Mihomo / Nikki
 ```
 
-## AI 调参
-
-命令行入口：
-
-```sh
-sh tcp-tune.sh AI测速
-sudo sh tcp-tune.sh AI自动优化 --host 2406:xxxx:xxxx::1 --objective startup --rounds 3
-sh tcp-tune.sh AI诊断 --摘要 SUMMARY.json
-```
-
-v0.3 使用混合闭环控制器：默认先对上传和下载各做 5 次测试，波动超过阈值时扩展到 10 次。只读/UDP、零重传、既往回滚、qdisc 压力、BDP 和首秒比例等可计算事实先由本地规则处理，AI 只处理剩余歧义并且只能从本机生成的候选 ID 和补测 ID 中选择。实际参数值、写入、复测、目标判定及回滚始终由本地确定性代码负责。候选只有通过主样本和 30 秒后的独立 holdout 才会保留。
-
-AI 不能执行任意命令，也不能返回 sysctl 参数值。决策必须是严格 11 字段的 v2 JSON；未知字段、越权候选、虚构证据、模型空响应或上游失败都会停止且不写入。只有显式传入 `--fallback stable` 时，AI 失败才会切换到原有确定性稳定优化。
-
-最近一次会话的脱敏动作、候选和本地判定结果会原子写入 `$TCP_TUNE_STATE_DIR/profiles/ai-last-events.jsonl`；不会保存模型思维链、token、密钥或原始上游响应。
-
-普通用户默认使用项目提供的 AI 网关，不需要自己配置 API Key。
-默认模型为 `gpt-5.5`，网关由项目方统一转发到 sub2api；可通过 `NVIDIA_MODEL` 覆盖请求模型名。
-
-> 当前 staging A/B 中，NVIDIA 的严格结构服从度高于 Sub2API，但原始模型都未达到独立准确率验收线。项目依赖混合控制器和失败关闭保证安全，不能把“使用 AI”理解为一定获得性能提升。
-
 ## HTTP Agent 安全边界
 
 HTTP Agent 是临时配对与测速控制面，不是面向公网的长期管理面板：
@@ -220,27 +195,13 @@ HTTP Agent 是临时配对与测速控制面，不是面向公网的长期管理
 | `TCP_TUNE_AGENT_TEST_ALLOWLIST` | 空 | `/test` 额外允许的目标，按实现支持的格式填写 |
 | `TCP_TUNE_ALLOW_QUERY_TOKEN` | `0` | 临时兼容 query token；不建议开启 |
 | `TCP_TUNE_DRY_RUN` | `0` | 只预览，不写系统配置 |
-| `TCP_TUNE_AI_GATEWAY_URL` | 项目公共网关 | OpenAI-compatible AI 网关 |
-| `TCP_TUNE_AI_GATEWAY_TOKEN` | 空 | 私有网关可选客户端鉴权 |
-| `NVIDIA_API_KEY` | 空 | 仅 NVIDIA 官方直连模式使用 |
-| `NVIDIA_BASE_URL` | NVIDIA 官方接口 | NVIDIA 直连地址 |
-| `NVIDIA_MODEL` | `gpt-5.5` | 请求模型名或兼容别名 |
-| `TCP_TUNE_AI_TIMEOUT` | `90` | AI 请求超时（秒） |
-| `TCP_TUNE_AI_MAX_ROUNDS` | `5` | AI 调优最大轮数 |
-| `TCP_TUNE_AI_MAX_MINUTES` | `30` | 单次 AI 闭环最长时间（分钟） |
-| `TCP_TUNE_AI_MAX_EXPERIMENTS` | `3` | 单次 AI 闭环最多候选实验数 |
-| `TCP_TUNE_AI_SAMPLE_COUNT` | `5` | 每个方向的默认重复样本数，波动大时最多 10 次 |
-| `TCP_TUNE_AI_OBJECTIVE_MAX_CV_PERCENT` | `20` | 候选保留时目标指标允许的最大 CV；超过即拒绝保留 |
-| `TCP_TUNE_AI_MIN_CANDIDATE_CONFIDENCE` | `650` | AI 发起本地候选实验的最低千分制置信度 |
-| `TCP_TUNE_AI_PROTOCOL` | `auto` | `auto`、`tuning-v2` 或兼容直连 `chat-completions` |
-| `TCP_TUNE_AI_MAX_TOKENS` | `1024` | AI 最大输出 token，不能超过 1024 |
 | `NO_COLOR` | 未设置 | 禁用 ANSI 颜色 |
 
-token、API Key 和密码只能通过环境变量或 GitHub Secrets 提供，不要写入脚本、配置、命令历史或 Issue。
+token 和密码只能通过环境变量或 GitHub Secrets 提供，不要写入脚本、配置、命令历史或 Issue。
 
 ## 开发与测试
 
-真实双端测试环境、统计结果、失败注入和未验证项见 [验证报告](docs/VALIDATION.md)。报告分别记录 v0.2 双端结果与 v0.3 AI 闭环当前未通过项。
+真实双端测试环境、统计结果、失败注入和未验证项见 [验证报告](docs/VALIDATION.md)。
 
 Shell 采用“源码模块化、发布单文件化”：日常修改 `src/`，通过固定模块清单生成根目录 `tcp-tune.sh`。OpenWrt 用户仍只需下载一个文件。
 
@@ -253,11 +214,10 @@ busybox ash -n tcp-tune.sh
 shellcheck -s sh tcp-tune.sh
 sh tests/shell/run.sh
 sh tests/agent/run.sh
-sh tests/ai/run.sh
-sh tests/router/run.sh
+python3 -m unittest discover -s tests/validation -p 'test_*.py'
 ```
 
-PowerShell 与 Worker：
+PowerShell：
 
 ```powershell
 $tokens = $null
@@ -271,16 +231,6 @@ if ($errors.Count) { $errors; exit 1 }
 
 Invoke-Pester .\tests\powershell
 ```
-
-```sh
-npm ci
-npm test
-npm run test:worker-runtime
-npm run check:worker
-npm run build:worker
-```
-
-离线 AI 场景评分使用 `python3 tests/validation/test_ai_evaluate.py`。合成参考决策通过只证明评分器与标签自洽，不代表真实模型准确率或链路性能已经达标；真实验收结论见 [双端验证报告](docs/VALIDATION.md)。
 
 测试必须使用模拟 sysctl 和临时状态目录，不得修改 CI 主机的真实网络参数。可用命令以当前分支实际文件为准；完整约束见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [AGENTS.md](AGENTS.md)。
 
@@ -312,7 +262,7 @@ sha256sum -c SHA256SUMS
 sudo sh tcp-tune.sh rollback
 ```
 
-`rollback` 会同时查找普通参数写入备份和 AI / 手动适配产生的 `manual-*` 备份，并尽量恢复写入前的运行时 sysctl 值。
+`rollback` 会同时查找普通参数写入备份和手动适配产生的 `manual-*` 备份，并尽量恢复写入前的运行时 sysctl 值。
 
 客户端菜单里的“恢复默认值”用于回到首次运行记录的双端快照：客户端恢复本机首次快照，同时通过带 token 的固定 Agent 端点请求服务端恢复启动时快照。它只处理本工具管理的 TCP/sysctl 参数，不修改防火墙、DNS、代理或路由策略。
 

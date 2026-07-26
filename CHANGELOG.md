@@ -8,37 +8,26 @@
 
 ## [0.3.0] - 待发布
 
-### Added
+### Removed
 
-- 新增 AI v2 本地闭环控制器、严格 11 字段决策协议、候选/证据白名单和会话预算。
-- 新增默认 5 次、波动时最多 10 次的双向证据采集，以及 30 秒后的独立 holdout 验证。
-- Worker 新增 `/v1/tuning/decision`，支持一次结构修复并对推理文本执行唯一合法 JSON 提取。
-- 新增 60 个合成 AI 场景、离线评分器、Worker workerd 运行时测试和 Router 实效校验。
-- PowerShell 新增 v2 严格决策解析，同时继续保持 Windows 只读评估边界。
+- 整体移除 AI 智能调参：客户端菜单选项 [2]、`AI测速`/`AI自动优化`/`AI诊断` 命令、`src/ai/` 模块与 Windows 端 AI 流程（`src/windows/40-ai.ps1`）。
+- 移除 Cloudflare Worker AI 网关与 npm 工程（`workers/`、`wrangler.toml`、`package.json`）及其测试（`tests/worker/`、`tests/ai/`、`tests/router/`）。
+- 移除 AI 相关环境变量（`TCP_TUNE_AI_*`、`NVIDIA_API_KEY`、`NVIDIA_BASE_URL`、`NVIDIA_MODEL`）与退出码 `EXIT_AI=8`。
+- 移除仅供 AI 使用的辅助函数（`src/core/json.sh` 的 JSON 字段提取、`src/tuning/benchmark.sh` 的多样本采集）。
 
 ### Changed
 
-- AI 不再返回参数值或命令，只能选择本地生成的候选 ID、补测 ID 或停止动作。
-- 模型在单次会话中固定，不再用短请求延迟选择调参模型。
-- AI 失败默认停止且不写入；确定性稳定优化只能通过 `--fallback stable` 显式启用。
-- 版本升级至 `0.3.0`，Worker 测试升级至 Vitest 4 并增加 Cloudflare workerd 本地运行验证。
-- AI 模式改为混合控制器：确定性证据负责只读/UDP、零重传、回滚、qdisc、BDP 和首秒比例，模型只处理非显然选择。
-- NVIDIA 专用调参调用启用 guided JSON；上游熔断按模型隔离，避免模型切换继承旧熔断状态。
-- 多上游模式支持显式优先级；验证环境采用 NVIDIA 首选、Sub2API 对可重试故障兜底。
-- AI 扩样只由吞吐 CV 触发；重传和首秒 CV 作为显式证据，并在候选保留时执行目标相关的 20% CV 护栏。
+- 客户端菜单删除选项 [2]，其余编号保持不变；帮助文本、README、架构文档与 CI/发布流程同步移除全部 AI 内容。
+- 高级链路诊断、预制参数与稳定自动优化等确定性能力保持不变。
 
-### Security
+### Added
 
-- Worker 公共模式按来源 IP 而不是未经验证的 Bearer 值限流，避免轮换伪 token 绕过配额。
-- 专用调参响应只返回清洗后的严格决策，不泄露上游推理、内部模型名、错误正文或密钥。
-- Windows/macOS、UDP/QUIC、未知候选、虚构证据和多重 JSON 决策全部失败关闭。
-- 高重传但 qdisc 证据为 `unsupported`/`failed`/`unknown` 时停止候选写入，避免把代理路径或上游拥塞误判为本机队列问题。
+- 新增 `docs/VALIDATION.md`，记录当前验证方法、测试入口与真实链路验证现状。
 
-### Validation
+### Breaking Changes
 
-- 合成参考集通过只代表评分器和标签自洽；原始模型仍未通过结构化准确率验收，详见 `docs/VALIDATION.md`。
-- 已完成隔离 staging 上游 A/B：Sub2API 严格 holdout 4/12，NVIDIA 6/12；原始模型均未达标。返工后的混合控制器通过 8/8 协议矩阵、5/5 路径拥塞和 5/5 qdisc 缺失重复测试。
-- 已完成 OpenWrt/VPS IPv6 P1 双向 5×20 秒基线、AI 真实停止决策、白名单写入后复测退化回滚及手动回滚；未证明当前链路获得性能提升，24 小时稳定性和生产部署仍未完成。
+- `AI测速`/`AI自动优化`/`AI诊断` 命令不再存在，执行将得到“未知命令”（退出码 2）。
+- `TCP_TUNE_AI_*` 与 `NVIDIA_*` 环境变量不再被读取；依赖 AI 网关的自动化脚本需要迁移到确定性命令（`auto`/`apply-profile`/`apply-smart`）。
 
 ## [0.2.0] - 待发布
 

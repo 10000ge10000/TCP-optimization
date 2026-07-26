@@ -354,7 +354,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         enums = {
             "objective": {"retrans", "throughput", "startup"},
             "direction": {"upload", "download", "both"},
-            "stage": {"preset-probe", "preset-apply", "rollback", "auto", "ai", "restore-defaults"},
+            "stage": {"preset-probe", "preset-apply", "rollback", "auto", "restore-defaults"},
             "result": {"running", "ok", "success", "rollback", "failed"},
         }
         for key, choices in enums.items():

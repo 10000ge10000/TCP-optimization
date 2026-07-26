@@ -15,8 +15,7 @@
    shellcheck -s sh tcp-tune.sh
    sh tests/shell/run.sh
    sh tests/agent/run.sh
-   npm ci
-   npm test
+   python3 -m unittest discover -s tests/validation -p 'test_*.py'
    ```
 
 3. 在 Windows PowerShell 5.1 和 PowerShell 7 中运行 Parser 与 Pester。
@@ -42,7 +41,7 @@ tcp-optimization-v0.3.0.zip
 SHA256SUMS
 ```
 
-工作流使用 `gh release create` 创建 GitHub Release，不发布 Worker、不部署生产环境，也不改仓库 description/topics。
+工作流使用 `gh release create` 创建 GitHub Release，不部署任何外部服务，也不改仓库 description/topics。
 
 ## 验收
 
@@ -72,7 +71,7 @@ Description：
 Topics：
 
 ```text
-tcp-optimization, openwrt, linux, iperf3, bbr, network-tuning, powershell, cloudflare-workers
+tcp-optimization, openwrt, linux, iperf3, bbr, network-tuning, powershell
 ```
 
 这些内容仅为建议，需要维护者在 GitHub 设置中手动确认。

@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   verify-linux:
-    name: Verify Linux, Agent and Worker
+    name: Verify Linux and Agent
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -54,18 +54,7 @@ jobs:
           shellcheck -s sh tcp-tune.sh
           sh tests/shell/run.sh
           sh tests/agent/run.sh
-          sh tests/ai/run.sh
           python3 -m unittest discover -s tests/validation -p 'test_*.py'
-          sh tests/router/run.sh
-
-      - name: Run Worker tests
-        run: |
-          npm ci
-          npm test
-          npm run test:worker-runtime
-          npm run check:worker
-          npm run build:worker
-          npm audit --audit-level=high
 
       - name: Check repository state
         run: |

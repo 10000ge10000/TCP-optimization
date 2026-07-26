@@ -407,7 +407,6 @@ manual_backup_begin() {
   snapshot_managed_file "$dir" "$OPENWRT_MINIMAL_FILE" openwrt-minimal || return 1
   snapshot_managed_file "$dir" "$SYSCTL_FILE" sysctl-file || return 1
   snapshot_managed_file "$dir" "$BASELINE_FILE" baseline-file || return 1
-  LAST_MANUAL_BACKUP="$dir"
   echo "$dir"
 }
 
@@ -436,7 +435,6 @@ ensure_initial_defaults_snapshot() {
     printf 'note=%s\n' "Initial TCP-optimization defaults snapshot. Restore only through restore-defaults."
   } > "$dir/metadata"
   atomic_write_line "$path_file" "$dir"
-  LAST_MANUAL_BACKUP="$dir"
   printf '%s\n' "$dir"
 }
 

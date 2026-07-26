@@ -11,14 +11,12 @@ TCP-optimization 是面向 VPS 与 OpenWrt、Linux、macOS、Windows 客户端�
 - 所有写入先备份、逐项验证、写入后复测；失败或性能退化立即回滚。
 - 不修改防火墙、WAN、DNS、DHCP、代理、路由、forwarding 或用户已有长期 iperf3 服务。
 - Windows 与 macOS 默认只测速、诊断和建议，不写 Linux TCP 参数。
-- AI 只返回结构化数据，执行层只接受白名单字段与受限数值。
 
 ## 技术栈与发布形态
 
 - POSIX Shell：Linux/OpenWrt/macOS 主逻辑，源码位于 `src/`。
 - PowerShell：Windows 客户端，根目录保留可直接运行的单文件。
 - Python 标准库：服务端临时 HTTP Agent；独立源码在构建时嵌入 Shell 发行版。
-- Cloudflare Worker：可选 AI 网关。
 - iperf3：单线程为默认调参证据，多线程只用于高级容量诊断。
 - sysctl：Linux/OpenWrt 受控参数写入。
 
@@ -30,7 +28,6 @@ src/
 ├── platform/   # 平台检测、能力矩阵和写入白名单
 ├── tuning/     # 测速、解析、指标、预设、优化、诊断、事务、回滚
 ├── agent/      # Agent 生命周期与独立 Python 源码
-├── ai/         # AI 客户端、响应 schema 与决策适配
 └── cli/        # 命令、菜单、仪表盘和入口
 
 scripts/
@@ -45,7 +42,7 @@ tcp-tune.ps1    # Windows 单文件发行版
 模块依赖只能单向流动：
 
 ```text
-core -> platform -> tuning / agent / ai -> cli
+core -> platform -> tuning / agent -> cli
 ```
 
 - `core` 不依赖菜单、Agent 或系统写入业务。
@@ -95,18 +92,7 @@ client 命令
   -> 保留，或退化/不确定时回滚
 ```
 
-AI 优化：
-
-```text
-脱敏指标与链路上下文
-  -> AI 网关
-  -> 结构化 JSON
-  -> schema、枚举、未知字段和数值边界校验
-  -> 平台白名单
-  -> 与确定性优化相同的事务写入、复测和回滚
-```
-
-`protocol_class=udp-quic` 时，AI 与规则引擎只给出 PMTU、qdisc、CPU 等诊断，不默认写 TCP sysctl。
+`protocol_class=udp-quic` 时，规则引擎只给出 PMTU、qdisc、CPU 等诊断，不默认写 TCP sysctl。
 
 ## 平台能力边界
 
@@ -116,7 +102,6 @@ AI 优化：
 | 单/双向 iperf3 | 支持 | 支持 | 支持 | 支持 |
 | 高级只读诊断 | 支持 | 支持 | 部分支持 | 部分支持 |
 | Linux TCP 参数写入 | 完整受控白名单 | 最小白名单 | 不支持 | 不支持 |
-| AI 结构化建议 | 支持 | 支持 | 支持 | 支持 |
 
 OpenWrt 最小参数白名单：
 
@@ -209,32 +194,6 @@ Agent 默认监听 `0.0.0.0:39188`，通过 CSPRNG 生成的会话 token 鉴权�
 - TTL 到期主动停止当前 Agent 与当前会话 iperf3；正常、异常和信号退出共享清理链路。
 - 禁止宽泛 `pkill iperf3`。
 
-## AI 网关
-
-Worker 对请求执行可选客户端鉴权、实际 body 大小限制、messages/schema/字符数限制、模型别名与最大输出 token 限制。跨实例限流和并发租约由 Durable Object 提供；上游熔断、总 deadline、有限故障切换和错误清洗避免成本失控及内部信息泄露。
-
-公共网关只能接收 `TCP_TUNE_AI_GATEWAY_TOKEN`；`NVIDIA_API_KEY` 只能发送到明确配置的 NVIDIA 官方直连地址。客户端不会获得上游密钥、内部模型库存或原始错误正文。
-
-### AI v2 闭环
-
-```text
-重复基线采集 → 严格证据快照 → 确定性证据层 → AI 处理剩余歧义
-      ↑                                  ↓
-独立 holdout ← 本地目标与护栏判定 ← 事务写入并复测
-      └──────── 不满足时立即回滚 ────────┘
-```
-
-- `src/ai/protocol.sh` 定义严格 11 字段决策协议；Shell 和 PowerShell 使用相同枚举、类型及交叉字段约束。
-- `src/ai/controller.sh` 拥有状态机和预算。AI 不接触命令、主机路径、原始参数值或写入 API，只能选择本地 allowlist ID。
-- Worker 的确定性证据层先处理只读/UDP、零重传、既往退化回滚、无本地 qdisc 压力的路径拥塞、BDP 和首秒比例；这些数学与安全结论不交给模型猜测。模型只处理剩余歧义，失败时不写入。
-- 每方向默认 5 个样本，离散度超限时扩展至 10 个；缺失或不稳定证据会失败关闭。
-- 写入仍通过既有事务层。主样本通过后还要等待 30 秒并执行 3 样本 holdout；失败即恢复写入前快照。
-- 活动候选在提交 holdout 前始终挂接备份；信号、异常或正常退出都会恢复未提交事务。最近一次脱敏事件原子保存为 `profiles/ai-last-events.jsonl`，不记录模型思维链或原始响应。
-- `/v1/tuning/decision` 在 Worker 侧重新校验请求和决策。推理文本中只有“唯一且完整通过协议校验”的 JSON 才可提取；多个候选或任一越权字段均拒绝。
-- NVIDIA 上游使用 guided JSON；熔断状态按上游和固定模型隔离。模型输出即使合法，也不能绕过本地多样本、holdout 和回滚。
-- Windows/macOS 与 `udp-quic` 请求不得获得 TCP 写入候选。Windows 仅解析和展示决策，不修改系统 TCP 栈。
-- `chat/completions` 兼容端点不会向客户端公开上游 `reasoning_content`；专用调参端点仅在内部用它尝试一次结构修复。
-
 ## CLI、机器输出与退出码
 
 现有命令、中文别名和菜单编号保持兼容。Shell 支持 `--json`、`--non-interactive`、`--no-color`，PowerShell 对应 `-Json`、`-NonInteractive`、`-NoColor`。
@@ -251,17 +210,17 @@ Worker 对请求执行可选客户端鉴权、实际 body 大小限制、message
 }
 ```
 
-退出码：0 成功；2 参数；3 依赖/平台；4 网络/Agent/TTL；5 鉴权；6 测速；7 写入/验证/回滚；8 AI/上游；130 中断。
+退出码：0 成功；2 参数；3 依赖/平台；4 网络/Agent/TTL；5 鉴权；6 测速；7 写入/验证/回滚；130 中断。
 
 ## 测试与发布约束
 
 - `scripts/check-generated.sh` 验证连续构建一致且根脚本与模块源码同步。
 - Shell 通过 `bash -n`、`dash -n`、BusyBox `ash -n`、ShellCheck `-s sh` 和纯函数测试。
 - fake sysctl 与临时状态目录验证事务和 dry-run，CI 不修改真实网络参数。
-- PowerShell 通过 Parser 和 Pester；Worker 通过 Node 单元及本地 Worker 测试。
+- PowerShell 通过 Parser 和 Pester（Windows PowerShell 5.1 与 PowerShell 7）。
 - Agent 集成测试覆盖鉴权、只读端点、body/并发/超时、SSRF、TTL、锁、PID 身份和清理。
 - `v*` tag 只触发发布，不由工作流自动创建；Release 先执行完整检查，再生成单文件、压缩包和 `SHA256SUMS`。
-- 普通 CI 只读，不使用真实 API Key；真实 AI smoke 仅允许手动、受保护 environment、单并发运行。
+- CI 只读，不修改真实网络参数，也不依赖任何外部 API Key。
 
 ## 架构决策记录
 

@@ -280,8 +280,7 @@ function Invoke-ClientMenu {
     Write-Section "操作菜单"
     Write-MenuGroup "优化"
     Write-MenuItem "0" "预制参数评估" "先检测双端基础信息，再推荐五档参数" "Yellow"
-    Write-MenuItem "1" "稳定自动优化" "不用 AI，规则固定，自动测速迭代" "Green"
-    Write-MenuItem "2" "AI 智能优化" "AI 给建议，脚本按白名单执行" "Cyan"
+    Write-MenuItem "1" "稳定自动优化" "规则固定，自动测速迭代" "Green"
     Write-Host ""
     Write-MenuGroup "状态"
     Write-MenuItem "3" "查看本机状态" "系统 / TCP 参数"
@@ -300,7 +299,6 @@ function Invoke-ClientMenu {
     switch ($choice) {
       "0" { if (Invoke-WindowsPresetAssessment -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
       "1" { if (Select-WindowsOptimization -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
-      "2" { if (Invoke-WindowsAITuning -PeerUrl $PeerUrl -TokenValue $TokenValue -HostName $HostName -Port $Port -LocalAddress $LocalAddress) { Read-Host "按回车返回主菜单" | Out-Null } }
       "3" { & $PSCommandPath status; Read-Host "按回车返回主菜单" | Out-Null }
       "4" { Invoke-AgentGet -Url "$PeerUrl/status" -TokenValue $TokenValue | ConvertTo-Json -Depth 8; Read-Host "按回车返回主菜单" | Out-Null }
       "5" { Show-AgentEventSummary -PeerUrl $PeerUrl -TokenValue $TokenValue; Read-Host "按回车返回主菜单" | Out-Null }
@@ -381,7 +379,6 @@ try {
   $code = $ExitNetwork
   if ($message -match 'token|auth|401|403') { $code = $ExitAuthentication }
   elseif ($message -match 'iperf3.*(测试|JSON|速率|超时)|测速') { $code = $ExitBenchmark }
-  elseif ($message -match '^AI |AI 返回|AI 请求|AI 网关|模型') { $code = $ExitAi }
   elseif ($message -match '缺少命令|安装|SHA256|压缩包|版本验证') { $code = $ExitDependency }
   elseif ($message -match '必须|无效|超出|不允许|格式') { $code = $ExitArguments }
   if ($Json) {

@@ -13,11 +13,9 @@
 
 - 先测速，再调参。任何自动优化都必须用 iperf3 的真实上传、下载、重传和首秒速度作为输入，不能只按预设写参数。
 - 默认单线程测试。多线程只能作为容量探测或人工排障选项，不作为默认调参依据。
-- P4 多流测试、PMTU 探测和 qdisc drop/backlog delta 只属于高级诊断或 AI 上下文证据；默认稳定自动优化不能因为这些诊断项而偷偷扩大干预范围。
+- P4 多流测试、PMTU 探测和 qdisc drop/backlog delta 只属于高级诊断证据；默认稳定自动优化不能因为这些诊断项而偷偷扩大干预范围。
 - 调参前必须采集这些输入：RTT、单线程 iperf3 上传/下载速率、上传/下载重传、首秒速度、内存、当前拥塞控制、当前 qdisc、当前 `rmem/wmem`、当前 `tcp_notsent_lowat`、当前 `tcp_limit_output_bytes`。
-- AI 调参和高级诊断可以额外采集：`machine_role`、`critical_direction`、`protocol_class`、PMTU、出口接口 MTU、qdisc drop/backlog delta、P1/P4 对比。`proxy_software` 和 `traffic_path` 只进入报告和 AI 上下文，不参与 shell 命令拼接。
-- AI v2 只能返回严格结构化决策并选择本地生成的候选 ID 或补测 ID；不得返回命令、sysctl 参数值、主机路径或扩大写入白名单。参数计算、事务写入、目标判定、holdout 和回滚必须由本地确定性代码完成。
-- AI 候选默认使用 5 次重复样本，波动超限时最多扩展至 10 次；主样本通过后仍需独立 holdout。模型空响应、虚构证据、未知候选或协议错误必须失败关闭，除非用户显式传入稳定优化 fallback。
+- 高级诊断可以额外采集：`machine_role`、`critical_direction`、`protocol_class`、PMTU、出口接口 MTU、qdisc drop/backlog delta、P1/P4 对比。`proxy_software` 和 `traffic_path` 只进入报告，不参与 shell 命令拼接。
 - BDP 只能作为初始估算。有效带宽优先取真实 iperf3 测速值；如果用户输入带宽与实测差异明显，自动逻辑必须以实测为准，并在提示中说明链路可能受限。
 - 缓冲区不能照搬超大值，必须受内存、RTT、重传、目标模式和复测结果约束。低内存设备必须主动下调推荐挡位。
 - 服务端模式默认保持只读监控；唯一例外是带 token 的 `restore-defaults` 固定端点只能恢复服务端首次启动时记录的 TCP/sysctl 快照，不能接受任意参数写入。
@@ -79,7 +77,7 @@
 ## 源码与生成文件
 
 - Shell 采用“源码模块化、发布单文件化”。功能源码放在 `src/`，根目录 `tcp-tune.sh` 是自动生成的发行文件。
-- 模块依赖方向固定为 `core -> platform -> tuning / agent / ai -> cli`，禁止底层模块反向调用 CLI 或读取菜单输入。
+- 模块依赖方向固定为 `core -> platform -> tuning / agent -> cli`，禁止底层模块反向调用 CLI 或读取菜单输入。
 - `src/core` 只能放配置、退出码、通用工具、校验、JSON 和 UI 基础能力，不得执行 Agent、菜单或 sysctl 业务。
 - `src/platform` 只实现平台检测、能力矩阵、参数存在性和写入白名单。
 - `src/tuning` 的纯计算函数必须接收显式参数并返回结果；不得直接绘制菜单或读取交互输入。
@@ -106,11 +104,7 @@ shellcheck -s sh tcp-tune.sh
 ```sh
 sh tests/shell/run.sh
 sh tests/agent/run.sh
-sh tests/ai/run.sh
-sh tests/router/run.sh
-npm ci
-npm test
-npm run test:worker-runtime
+python3 -m unittest discover -s tests/validation -p 'test_*.py'
 ```
 
 PowerShell：
@@ -132,12 +126,11 @@ Invoke-Pester .\tests\powershell
 - `dry-run` 测试必须证明项目管理文件和系统路径均未发生写入。
 - iperf3 解析测试必须覆盖多版本 fixtures、上传/下载方向、缺失字段、数值 0 和无效 JSON。
 - Agent 测试必须覆盖 header token、query token 兼容开关、请求体上限、SSRF、TTL、锁、PID 身份和只读端点。
-- Worker 测试使用 mock 上游，不得在普通 CI 中读取真实 API Key 或发送真实 AI 请求。
 
 ## 版本与发布
 
 - 版本号遵循 Semantic Versioning；`CHANGELOG.md` 使用 Added、Changed、Fixed、Security、Breaking Changes 等明确分类。
-- 普通 CI 权限只读。真实 AI smoke 只能手动触发，必须使用受保护 environment、单并发和显式超时。
+- CI 权限只读，不依赖任何外部 API Key。
 - Release 工作流只能响应维护者创建的 `v*` tag，不得自动创建或推送 tag。
 - 发布前必须执行完整测试和生成一致性检查；产物至少包含 Shell、PowerShell、源码压缩包和 `SHA256SUMS`。
 - GitHub Actions 使用最小权限；只有 Release job 可以申请 `contents: write`。

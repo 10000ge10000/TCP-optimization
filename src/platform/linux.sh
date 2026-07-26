@@ -52,7 +52,7 @@ apply_vps_adapt_values() {
   validate_bool_number "$slow_start" || die "非法 tcp_slow_start_after_idle：$slow_start"
   validate_positive_int_range "$rmem_max" 1048576 268435456 || die "非法 rmem_max：$rmem_max"
   validate_positive_int_range "$wmem_max" 1048576 268435456 || die "非法 wmem_max：$wmem_max"
-  validate_positive_int_range "$notsent_lowat" 16384 "$(ai_max_notsent)" || die "非法 tcp_notsent_lowat：$notsent_lowat"
+  validate_positive_int_range "$notsent_lowat" 16384 "$(max_notsent_lowat)" || die "非法 tcp_notsent_lowat：$notsent_lowat"
   validate_positive_int_range "$limit_output" 131072 4194304 || die "非法 tcp_limit_output_bytes：$limit_output"
 
   if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -79,7 +79,6 @@ EOF
     restore_manual_backup "$backup_dir" >/dev/null 2>&1 || true
     DIE_EXIT_CODE="$EXIT_APPLY" die "VPS 适配事务加载或验证失败，已回滚；备份目录：$backup_dir"
   fi
-  LAST_MANUAL_BACKUP="$backup_dir"
   info "VPS 适配参数已保存并加载：$VPS_ADAPT_FILE"
   info "备份目录：$backup_dir"
 }
@@ -88,10 +87,10 @@ vps_adapt_profile() {
   profile="$1"
   case "$profile" in
     cubic-safe|balanced)
-      apply_vps_adapt_values cubic 1 0 67108864 67108864 "$(ai_max_notsent)" 1048576
+      apply_vps_adapt_values cubic 1 0 67108864 67108864 "$(max_notsent_lowat)" 1048576
       ;;
     bbr-fast)
-      apply_vps_adapt_values bbr 1 0 67108864 67108864 "$(ai_max_notsent)" 1048576
+      apply_vps_adapt_values bbr 1 0 67108864 67108864 "$(max_notsent_lowat)" 1048576
       ;;
     *)
       die "未知 VPS 适配预设：$profile"

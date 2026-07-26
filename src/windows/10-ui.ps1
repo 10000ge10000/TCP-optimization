@@ -155,6 +155,24 @@ function Get-TrendLabel {
   return "保持稳定"
 }
 
+function Format-Retransmits {
+  param([Nullable[Int64]]$Retransmits)
+  if ($null -eq $Retransmits) { return "未检测" }
+  return ("{0:N0} 次" -f $Retransmits)
+}
+
+function Get-RetransmitsColor {
+  param([Nullable[Int64]]$Retransmits)
+  if ($null -eq $Retransmits) { return "DarkGray" }
+  if ($Retransmits -gt 0) { return "Yellow" }
+  return "Green"
+}
+
+function Test-RetransmitsAtOrBelowTarget {
+  param([Nullable[Int64]]$Retransmits, [Int64]$Target)
+  return ($null -ne $Retransmits -and $Retransmits -le $Target)
+}
+
 function Get-NextActionLabel {
   param([string]$ObjectiveValue, [Nullable[Int64]]$Retransmits, [Int64]$TargetRetransmits)
   if ($null -eq $Retransmits) { return "未检测到重传指标，不能据此判断。" }

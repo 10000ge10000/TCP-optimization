@@ -6,7 +6,6 @@
 - `10-ui.ps1`：轻量终端显示与格式化。
 - `20-runtime.ps1`：固定版本 iperf3 的安全安装和依赖检查。
 - `30-network.ps1`：Agent、地址、测速和 iperf3 JSON 解析。
-- `40-ai.ps1`：AI 网关调用、鉴权边界和严格 JSON 校验。
 - `50-cli.ps1`：Windows 链路评估、菜单和命令分发。
 
 修改模块后运行：

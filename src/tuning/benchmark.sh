@@ -240,59 +240,6 @@ measure_iperf_samples() {
   printf '%s\t%s\t%s\t%s\n' "$median_bps" "$median_retr" "$median_first" "$spread"
 }
 
-sample_cv_percent() {
-  awk '
-    { v[NR]=$1+0; sum+=$1; n++ }
-    END {
-      if (n < 2 || sum == 0) { print 0; exit }
-      mean=sum/n
-      for (i=1; i<=n; i++) { d=v[i]-mean; ss+=d*d }
-      sd=sqrt(ss/(n-1))
-      printf "%.0f\n", sd*100/mean
-    }
-  '
-}
-
-measure_iperf_samples_detailed() {
-  host="$1"; port="$2"; reverse="$3"; seconds="$4"; bind_ip="${5:-}"; parallel="${6:-1}"
-  count="${7:-$TCP_TUNE_AI_SAMPLE_COUNT}"
-  validate_positive_int_range "$count" 3 10 || return 1
-  temp_dir="$(secure_temp_dir tcp-tune-ai-samples)" || return 1
-  samples="$temp_dir/metrics.tsv"
-  : > "$samples"
-  target="$count"
-  while :; do
-    while [ "$(wc -l < "$samples" | tr -d ' ')" -lt "$target" ]; do
-      json="$(run_iperf_client "$host" "$port" "$reverse" "$seconds" "$bind_ip" "$parallel" 2>/dev/null || true)"
-      if [ -z "$json" ] || ! printf '%s' "$json" | grep -q '"end"'; then rm -f "$samples"; rmdir "$temp_dir" 2>/dev/null || true; return 1; fi
-      bps="$(printf '%s\n' "$json" | extract_bps 2>/dev/null || true)"
-      retr="$(printf '%s\n' "$json" | extract_retransmits 2>/dev/null || true)"
-      first="$(printf '%s\n' "$json" | extract_first_interval_bps 2>/dev/null || true)"
-      if ! is_unsigned_integer "$bps" || ! is_unsigned_integer "$retr" || ! is_unsigned_integer "$first"; then
-        rm -f "$samples"; rmdir "$temp_dir" 2>/dev/null || true; return 1
-      fi
-      printf '%s\t%s\t%s\n' "$bps" "$retr" "$first" >> "$samples"
-    done
-    bps_cv="$(cut -f1 "$samples" | sample_cv_percent)"
-    retr_cv="$(cut -f2 "$samples" | sample_cv_percent)"
-    first_cv="$(cut -f3 "$samples" | sample_cv_percent)"
-    # Only throughput dispersion controls resampling. Retransmit counts and the
-    # first interval are naturally noisier; their CV remains explicit evidence
-    # and the objective-specific acceptance gate decides whether it is usable.
-    if [ "$bps_cv" -le "$TCP_TUNE_MAX_SPREAD_PERCENT" ]; then
-      break
-    fi
-    [ "$target" -ge 10 ] && { rm -f "$samples"; rmdir "$temp_dir" 2>/dev/null || true; return 2; }
-    target=$((target + 5)); [ "$target" -le 10 ] || target=10
-  done
-  median_bps="$(cut -f1 "$samples" | numeric_median)"
-  median_retr="$(cut -f2 "$samples" | numeric_median)"
-  median_first="$(cut -f3 "$samples" | numeric_median)"
-  actual_count="$(wc -l < "$samples" | tr -d ' ')"
-  rm -f "$samples"; rmdir "$temp_dir" 2>/dev/null || true
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$median_bps" "$median_retr" "$median_first" "$bps_cv" "$retr_cv" "$first_cv" "$actual_count"
-}
-
 run_iperf3_speedtest() {
   host="$1"
   port="$2"
