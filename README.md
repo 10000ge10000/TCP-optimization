@@ -49,6 +49,15 @@ TCP-optimization 是一个双端 TCP 调优脚本，用来在 VPS 和客户端�
 curl -fsSL https://raw.githubusercontent.com/10000ge10000/TCP-optimization/main/tcp-tune.sh | sudo sh -s -- --yes server
 ```
 
+> 直接管道执行 main 分支脚本无法校验完整性。对安全要求较高的环境，建议改用固定版本的 Release 资产并先校验哈希：
+>
+> ```sh
+> curl -fsSLO https://github.com/10000ge10000/TCP-optimization/releases/latest/download/tcp-tune.sh
+> curl -fsSLO https://github.com/10000ge10000/TCP-optimization/releases/latest/download/SHA256SUMS
+> sha256sum -c SHA256SUMS --ignore-missing
+> sudo sh tcp-tune.sh --yes server
+> ```
+
 服务端启动后会显示 OpenWrt/Linux/macOS/Windows 客户端命令。
 
 ### 2. 客户端运行
@@ -61,6 +70,13 @@ curl -fsSL https://raw.githubusercontent.com/10000ge10000/TCP-optimization/main/
 sh tcp-tune.sh --yes client --peer http://SERVER:39188 --token TOKEN --iperf-port 5201
 ```
 
+多用户主机上 `--token` 会进入 shell history 与进程参数，可改用环境变量：
+
+```sh
+export TCP_TUNE_TOKEN=TOKEN
+sh tcp-tune.sh --yes client --peer http://SERVER:39188 --iperf-port 5201
+```
+
 Windows PowerShell：
 
 ```powershell
@@ -68,7 +84,7 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/10000ge10000/TCP-optimiza
 .\tcp-tune.ps1 client -Peer http://SERVER:39188 -Token TOKEN -IperfPort 5201 -Direction download -Yes
 ```
 
-Windows 无 winget/choco/scoop 时，脚本会把 iperf3 下载到用户缓存目录，不写系统目录。
+Windows 无 winget/choco/scoop 时，脚本会把 iperf3 下载到用户缓存目录，不写系统目录。自动下载的 iperf3 来自社区构建仓库 [ar51an/iperf3-win-builds](https://github.com/ar51an/iperf3-win-builds)（固定 3.18 版本，下载后强制校验内置 SHA256，不匹配即失败）；企业环境可预装 iperf3 跳过自动下载。
 
 ## 平台能力
 
@@ -173,7 +189,8 @@ BBR/qdisc 仅在内核明确支持时作为基础能力处理，并且同样走�
 
 HTTP Agent 是临时配对与测速控制面，不是面向公网的长期管理面板：
 
-- 默认使用明文 HTTP，token 只能防止未授权调用，不能提供传输加密。跨公网使用时应限制安全组/防火墙来源，或通过可信 VPN、SSH 隧道接入。
+- 默认使用明文 HTTP，token 以明文头传输，只能防止未授权调用，不能提供传输加密。跨公网使用时应限制安全组/防火墙来源，或通过可信 VPN、SSH 隧道接入。
+- 走 VPN/隧道时可设置 `TCP_TUNE_AGENT_BIND` 把 Agent 监听收敛到指定接口地址（默认监听全部接口）。
 - 默认只接受请求头 token。把 token 放入 URL 会进入浏览器历史、反向代理或访问日志，因此 query token 仅用于显式开启的短期兼容场景。
 - Agent 默认只读；写入类端点拒绝任意 sysctl。唯一例外 `/restore-defaults` 只能恢复服务端启动时记录的首次快照。
 - `/test` 只应访问当前配对客户端或显式 allowlist；不要将 Agent 端口暴露给不可信网络。
@@ -189,6 +206,8 @@ HTTP Agent 是临时配对与测速控制面，不是面向公网的长期管理
 | `TCP_TUNE_STATE_DIR` | `/var/lib/tcp-tune` | 状态、备份、会话和报告目录 |
 | `TCP_TUNE_SYSCTL_FILE` | `/etc/sysctl.d/99-tcp-tune.conf` | 项目管理的 Linux sysctl 文件 |
 | `TCP_TUNE_AGENT_PORT` | `39188` | HTTP Agent 监听端口 |
+| `TCP_TUNE_AGENT_BIND` | 空（全部接口） | Agent 监听地址，可收敛到内网/VPN 接口 |
+| `TCP_TUNE_TOKEN` | 空 | 客户端 `client`/`join` 的 token 来源，替代 `--token` 避免进入 history |
 | `TCP_TUNE_IPERF_PORT` | `5201` | iperf3 测试端口 |
 | `TCP_TUNE_SESSION_TTL` | `1800` | 临时会话有效期（秒） |
 | `TCP_TUNE_PUBLIC_URL` | 空 | 客户端可访问的 Agent URL |

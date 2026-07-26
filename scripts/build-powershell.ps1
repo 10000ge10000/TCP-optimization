@@ -2,7 +2,8 @@ param([switch]$Check)
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$sourceRoot = Join-Path $repoRoot "src\windows"
+# Nested Join-Path keeps the separator portable between Windows PowerShell 5.1 and Linux pwsh.
+$sourceRoot = Join-Path (Join-Path $repoRoot "src") "windows"
 $target = Join-Path $repoRoot "tcp-tune.ps1"
 $modules = @(
   "00-entry.ps1",

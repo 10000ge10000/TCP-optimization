@@ -451,6 +451,12 @@ class DualStackThreadingHTTPServer(http.server.ThreadingHTTPServer):
 
 
 def create_server():
+    # TCP_TUNE_AGENT_BIND 允许把监听面收敛到内网/VPN 接口；默认保持双栈全接口。
+    bind_address = os.environ.get("TCP_TUNE_AGENT_BIND", "").strip()
+    if bind_address:
+        if ":" in bind_address:
+            return DualStackThreadingHTTPServer((bind_address, AGENT_PORT), Handler)
+        return http.server.ThreadingHTTPServer((bind_address, AGENT_PORT), Handler)
     try:
         return DualStackThreadingHTTPServer(("::", AGENT_PORT), Handler)
     except OSError:

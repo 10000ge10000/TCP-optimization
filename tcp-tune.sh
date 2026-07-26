@@ -109,16 +109,15 @@ need_root() {
 
 ensure_state_dir() {
   need_root
-  umask 077
-  mkdir -p "$STATE_DIR/backups" "$STATE_DIR/sessions" "$STATE_DIR/rolled-back"
+  # 子 shell 内收紧 umask，避免修改整个进程的全局 umask。
+  (umask 077; mkdir -p "$STATE_DIR/backups" "$STATE_DIR/sessions" "$STATE_DIR/rolled-back") || return 1
   chmod 700 "$STATE_DIR" "$STATE_DIR/backups" "$STATE_DIR/sessions" "$STATE_DIR/rolled-back" 2>/dev/null || true
 }
 
 secure_temp_dir() {
   prefix="${1:-tcp-tune}"
   if have_cmd mktemp; then
-    umask 077
-    mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX"
+    (umask 077; mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
     return
   fi
   return 1
@@ -131,8 +130,7 @@ atomic_copy_file() {
   [ "$target_dir" = "$target_file" ] && target_dir=.
   mkdir -p "$target_dir"
   tmp_file="$target_dir/.tcp-tune.$$.tmp"
-  umask 077
-  cp "$source_file" "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+  (umask 077; cp "$source_file" "$tmp_file") || { rm -f "$tmp_file"; return 1; }
   chmod 600 "$tmp_file" 2>/dev/null || true
   mv -f "$tmp_file" "$target_file"
 }
@@ -144,8 +142,7 @@ atomic_write_line() {
   [ "$target_dir" = "$target_file" ] && target_dir=.
   mkdir -p "$target_dir"
   tmp_file="$target_dir/.tcp-tune.$$.tmp"
-  umask 077
-  printf '%s\n' "$value" > "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+  (umask 077; printf '%s\n' "$value" > "$tmp_file") || { rm -f "$tmp_file"; return 1; }
   chmod 600 "$tmp_file" 2>/dev/null || true
   mv -f "$tmp_file" "$target_file"
 }
@@ -257,6 +254,20 @@ mask_report_peer() {
       inner="$(printf '%s' "$value" | sed 's#^[^[]*\[\([^]]*\)\].*#\1#')"
       first="${inner%%:*}"
       last="${inner##*:}"
+      printf '%s\n' "$(safe_report_text "$first:...:$last")"
+      return 0
+      ;;
+    *.*.*.*:*)
+      # IPv4:端口——IPv4 段仍需打码，不能因带端口而整段进入报告。
+      host_part="${value%%:*}"
+      port_part="${value##*:}"
+      if [ "${value%:*}" = "$host_part" ]; then
+        masked_host="$(mask_report_peer "$host_part")"
+        printf '%s\n' "$(safe_report_text "$masked_host:$port_part")"
+        return 0
+      fi
+      first="${value%%:*}"
+      last="${value##*:}"
       printf '%s\n' "$(safe_report_text "$first:...:$last")"
       return 0
       ;;
@@ -3394,8 +3405,7 @@ random_token() {
 
 write_agent_py() {
   path="$1"
-  umask 077
-  cat > "$path" <<'PY'
+  (umask 077; cat > "$path" <<'PY'
 #!/usr/bin/env python3
 """Temporary, authenticated TCP-optimization HTTP agent."""
 
@@ -3849,6 +3859,12 @@ class DualStackThreadingHTTPServer(http.server.ThreadingHTTPServer):
 
 
 def create_server():
+    # TCP_TUNE_AGENT_BIND 允许把监听面收敛到内网/VPN 接口；默认保持双栈全接口。
+    bind_address = os.environ.get("TCP_TUNE_AGENT_BIND", "").strip()
+    if bind_address:
+        if ":" in bind_address:
+            return DualStackThreadingHTTPServer((bind_address, AGENT_PORT), Handler)
+        return http.server.ThreadingHTTPServer((bind_address, AGENT_PORT), Handler)
     try:
         return DualStackThreadingHTTPServer(("::", AGENT_PORT), Handler)
     except OSError:
@@ -3889,7 +3905,44 @@ if __name__ == "__main__":
             start_new_session=True,
         )
 PY
+  )
   chmod 700 "$path"
+}
+
+# 用 curl --config 传递鉴权头：token 不进入进程 argv，同机其他用户无法通过 ps 读取。
+curl_with_token() {
+  curl_token_value="$1"
+  shift
+  curl_header_cfg="$( (umask 077; mktemp "${TMPDIR:-/tmp}/tcp-tune-hdr.XXXXXX") 2>/dev/null )" || curl_header_cfg=""
+  if [ -z "$curl_header_cfg" ]; then
+    # 极少数无 mktemp 的环境退回请求头方式，保持功能可用。
+    curl -H "X-TCP-Tune-Token: $curl_token_value" "$@"
+    return
+  fi
+  printf 'header = "X-TCP-Tune-Token: %s"\n' "$curl_token_value" > "$curl_header_cfg"
+  curl --config "$curl_header_cfg" "$@"
+  curl_with_token_rc=$?
+  rm -f "$curl_header_cfg"
+  return "$curl_with_token_rc"
+}
+
+post_json() {
+  url="$1"
+  token="$2"
+  data="$3"
+  curl_with_token "$token" -fsS -H "Content-Type: application/json" -d "$data" "$url"
+}
+
+post_client_stage() {
+  stage="$1"
+  result="$2"
+  detail="${3:-}"
+  [ -n "${TUNE_REPORT_PEER:-}" ] || return 0
+  [ -n "${TUNE_REPORT_TOKEN:-}" ] || return 0
+  now="$(date +%s)"
+  lan_ip="${TUNE_CLIENT_IP:-$(local_lan_ipv4 || true)}"
+  data="{\"role\":\"client-stage\",\"lan_ip\":$(json_string "$lan_ip"),\"stage\":$(json_string "$stage"),\"result\":$(json_string "$result"),\"detail\":$(json_string "$detail"),\"time\":$now}"
+  post_json "$TUNE_REPORT_PEER/report" "$TUNE_REPORT_TOKEN" "$data" >/dev/null 2>&1 || true
 }
 
 listen_mode() {
@@ -3902,25 +3955,28 @@ listen_mode() {
   lock_dir="$lock_root/agent-$AGENT_PORT.lock"
   mkdir -p "$lock_root"
   chmod 700 "$lock_root" 2>/dev/null || true
-  if ! mkdir "$lock_dir" 2>/dev/null; then
-    DIE_EXIT_CODE="$EXIT_NETWORK" die "Agent 端口 $AGENT_PORT 已有会话锁；请先运行 stop-agent 并确认旧会话已结束。"
-  fi
-  ensure_initial_defaults_snapshot "server" >/dev/null || warn "无法记录服务端首次默认值快照，恢复默认值菜单将只恢复客户端。"
   if [ "${DRY_RUN:-0}" = "1" ]; then
+    # dry-run 只检查、不获取会话锁：中途任何异常（如输出管道被关闭）都不会遗留锁。
+    if [ -d "$lock_dir" ]; then
+      DIE_EXIT_CODE="$EXIT_NETWORK" die "Agent 端口 $AGENT_PORT 已有会话锁；请先运行 stop-agent 并确认旧会话已结束。"
+    fi
+    ensure_initial_defaults_snapshot "server" >/dev/null || warn "无法记录服务端首次默认值快照，恢复默认值菜单将只恢复客户端。"
     if [ -n "$LISTEN_PUBLIC_URL" ]; then
       peer_url="$LISTEN_PUBLIC_URL"
     else
       peer_url="http://<公网IP>:$AGENT_PORT"
     fi
     token="<启动后自动生成>"
-    echo "[dry-run] 将启动临时 HTTP Agent：[::]:$AGENT_PORT（失败时回退 0.0.0.0）"
+    echo "[dry-run] 将启动临时 HTTP Agent：${TCP_TUNE_AGENT_BIND:-[::]}:$AGENT_PORT（未设 TCP_TUNE_AGENT_BIND 时失败回退 0.0.0.0）"
     echo "[dry-run] 将启动 iperf3 server：0.0.0.0:$IPERF_PORT"
     echo "[dry-run] 会话 TTL：$SESSION_TTL 秒"
     print_client_commands "$peer_url" "$token"
-    # dry-run 不保留会话锁，否则后续真实 listen 会被永久阻塞。
-    rmdir "$lock_dir" 2>/dev/null || true
     return 0
   fi
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    DIE_EXIT_CODE="$EXIT_NETWORK" die "Agent 端口 $AGENT_PORT 已有会话锁；请先运行 stop-agent 并确认旧会话已结束。"
+  fi
+  ensure_initial_defaults_snapshot "server" >/dev/null || warn "无法记录服务端首次默认值快照，恢复默认值菜单将只恢复客户端。"
 
   token="$(random_token)" || { rmdir "$lock_dir" 2>/dev/null || true; DIE_EXIT_CODE="$EXIT_DEPENDENCY" die "无法获得安全随机源，拒绝启动 Agent。"; }
   session_id="$(random_token)" || { rmdir "$lock_dir" 2>/dev/null || true; DIE_EXIT_CODE="$EXIT_DEPENDENCY" die "无法生成会话标识。"; }
@@ -3938,6 +3994,7 @@ listen_mode() {
   export TCP_TUNE_SESSION_TTL="$SESSION_TTL"
   export TCP_TUNE_STATE_DIR="$STATE_DIR"
   export TCP_TUNE_AGENT_BODY_LIMIT TCP_TUNE_AGENT_MAX_CONCURRENCY TCP_TUNE_AGENT_TEST_ALLOWLIST TCP_TUNE_ALLOW_QUERY_TOKEN
+  export TCP_TUNE_AGENT_BIND="${TCP_TUNE_AGENT_BIND:-}"
 
   nohup python3 "$agent_py" > "$STATE_DIR/agent-$AGENT_PORT.log" 2>&1 &
   agent_pid="$!"
@@ -3964,7 +4021,7 @@ listen_mode() {
   check_url="http://127.0.0.1:$AGENT_PORT/state"
   ready_try=0
   while [ "$ready_try" -lt 10 ]; do
-    if curl -fsS --max-time 2 -H "X-TCP-Tune-Token: $token" "$check_url" >/dev/null 2>&1; then
+    if curl_with_token "$token" -fsS --max-time 2 "$check_url" >/dev/null 2>&1; then
       ready=1
       break
     fi
@@ -4036,35 +4093,16 @@ stop_agent() {
 
 # BEGIN src/cli/server-dashboard.sh
 # Module: src/cli/server-dashboard.sh
-post_json() {
-  url="$1"
-  token="$2"
-  data="$3"
-  curl -fsS -H "X-TCP-Tune-Token: $token" -H "Content-Type: application/json" -d "$data" "$url"
-}
-
-post_client_stage() {
-  stage="$1"
-  result="$2"
-  detail="${3:-}"
-  [ -n "${TUNE_REPORT_PEER:-}" ] || return 0
-  [ -n "${TUNE_REPORT_TOKEN:-}" ] || return 0
-  now="$(date +%s)"
-  lan_ip="${TUNE_CLIENT_IP:-$(local_lan_ipv4 || true)}"
-  data="{\"role\":\"client-stage\",\"lan_ip\":$(json_string "$lan_ip"),\"stage\":$(json_string "$stage"),\"result\":$(json_string "$result"),\"detail\":$(json_string "$detail"),\"time\":$now}"
-  post_json "$TUNE_REPORT_PEER/report" "$TUNE_REPORT_TOKEN" "$data" >/dev/null 2>&1 || true
-}
-
 get_agent_json() {
   url="$1"
   token="$2"
-  curl -fsS -H "X-TCP-Tune-Token: $token" "$url"
+  curl_with_token "$token" -fsS "$url"
 }
 
 remote_defaults_available() {
   peer="$1"
   token="$2"
-  curl -fsS --max-time 3 -H "X-TCP-Tune-Token: $token" "$peer/defaults" 2>/dev/null | grep -q '"available": true'
+  curl_with_token "$token" -fsS --max-time 3 "$peer/defaults" 2>/dev/null | grep -q '"available": true'
 }
 
 defaults_menu_tag() {
@@ -4206,7 +4244,7 @@ render_server_dashboard() {
 render_server_activity() {
   token="$1"
   dashboard_file="$STATE_DIR/server-dashboard-$AGENT_PORT.json"
-  if ! curl -fsS -H "X-TCP-Tune-Token: $token" "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
+  if ! curl_with_token "$token" -fsS "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
     printf "%s会话状态%s\n" "$COLOR_BOLD$COLOR_CYAN" "$COLOR_RESET"
     print_rule
     echo "  Agent 状态暂时不可读。"
@@ -4327,7 +4365,7 @@ server_compact_status_line() {
   remaining="${2:-0}"
   ttl_text="$((remaining / 60))m $((remaining % 60))s"
   dashboard_file="$STATE_DIR/server-compact-$AGENT_PORT.json"
-  if ! curl -fsS -H "X-TCP-Tune-Token: $token" "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
+  if ! curl_with_token "$token" -fsS "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
     printf "刷新 %s | 剩余 %s | Agent 状态暂不可读" "$(date '+%H:%M:%S')" "$ttl_text"
     return 0
   fi
@@ -4470,6 +4508,7 @@ print_client_commands() {
   esac
   ui_section "客户端连接命令"
   ui_note "令牌" "交互终端显示完整 token；非交互输出会隐藏 token。"
+  ui_note "安全" "多用户客户端主机上建议先 export TCP_TUNE_TOKEN=<令牌> 再省略 --token，避免 token 进入 shell history。"
   printf "%sOpenWrt / Linux / macOS%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   cat <<EOF
   curl -fsSL $RAW_BASE_URL/tcp-tune.sh | \\
@@ -4550,7 +4589,9 @@ join_mode() {
   done
 
   [ -n "$peer" ] || die "缺少 --peer"
-  [ -n "$token" ] || die "缺少 --token"
+  # 多用户主机上 --token 会进入 shell history 与进程参数；支持从环境变量读取。
+  [ -n "$token" ] || token="${TCP_TUNE_TOKEN:-}"
+  [ -n "$token" ] || die "缺少 --token（也可通过环境变量 TCP_TUNE_TOKEN 提供）"
   validate_peer_url "$peer" || die "--peer 必须是无用户信息、query 和 fragment 的 http(s) URL。"
   if [ "${#token}" -lt 16 ] || [ "${#token}" -gt 512 ]; then die "--token 长度必须在 16 到 512 之间。"; fi
   validate_port_value "$iperf_port" || die "--iperf-port 必须在 1 和 65535 之间。"

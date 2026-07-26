@@ -44,6 +44,17 @@ jobs:
       - name: Run validation tool tests
         run: python3 -m unittest discover -s tests/validation -p 'test_*.py'
 
+      - name: Distribution smoke test
+        run: |
+          sh tcp-tune.sh --help >/dev/null
+          if sh tcp-tune.sh not-a-command >/dev/null 2>&1; then
+            echo "unknown command must fail" >&2
+            exit 1
+          fi
+          sudo sh tcp-tune.sh --dry-run --yes local-minimal --ipv6-peer 2001:db8::1
+          sudo sh tcp-tune.sh --dry-run --yes vps-adapt --peer-ipv6 2001:db8::1 --profile cubic-safe
+          sudo sh tcp-tune.sh --dry-run --yes listen
+
       - name: Check whitespace and generated tree
         run: |
           git diff --check
@@ -82,6 +93,14 @@ jobs:
           ) | Out-Null
           if ($errors.Count) { $errors | Format-List; exit 1 }
 
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $results = Invoke-ScriptAnalyzer -Path .\src\windows -Recurse -Severity Error
+          $results | Format-Table -AutoSize
+          if ($results) { exit 1 }
+
       - name: Install and run Pester with Windows PowerShell 5.1
         shell: powershell
         run: |
@@ -95,3 +114,23 @@ jobs:
       - name: Run Pester with PowerShell 7
         shell: pwsh
         run: Invoke-Pester -Path .\tests\powershell -CI
+
+  macos:
+    name: macOS shell compatibility
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Parse with macOS sh and verify BSD awk parser
+        run: |
+          sh -n tcp-tune.sh
+          TCP_TUNE_LIBRARY=1 sh -c '
+            . ./tcp-tune.sh
+            have_cmd() { return 1; }
+            first="$(extract_first_interval_bps < tests/fixtures/iperf3/iperf-3.17.1-ipv6-upload-p1.json)"
+            [ "$first" = "248227048" ] || { echo "awk first=$first" >&2; exit 1; }
+            bps="$(extract_bps < tests/fixtures/iperf3/iperf-3.17.1-ipv6-upload-p1.json)"
+            [ "$bps" = "64288432" ] || { echo "awk bps=$bps" >&2; exit 1; }
+          '

@@ -46,7 +46,9 @@ join_mode() {
   done
 
   [ -n "$peer" ] || die "缺少 --peer"
-  [ -n "$token" ] || die "缺少 --token"
+  # 多用户主机上 --token 会进入 shell history 与进程参数；支持从环境变量读取。
+  [ -n "$token" ] || token="${TCP_TUNE_TOKEN:-}"
+  [ -n "$token" ] || die "缺少 --token（也可通过环境变量 TCP_TUNE_TOKEN 提供）"
   validate_peer_url "$peer" || die "--peer 必须是无用户信息、query 和 fragment 的 http(s) URL。"
   if [ "${#token}" -lt 16 ] || [ "${#token}" -gt 512 ]; then die "--token 长度必须在 16 到 512 之间。"; fi
   validate_port_value "$iperf_port" || die "--iperf-port 必须在 1 和 65535 之间。"

@@ -49,6 +49,10 @@ if validate_peer_url 'http://user@example.com'; then failed=$((failed + 1)); pri
 escaped="$(printf 'a\tb\\c"d\ne' | json_escape_string)"
 check_equal "JSON escaping" 'a\tb\\c\"d\ne' "$escaped"
 
+check_equal "bare IPv4 peer is masked" "192.0.x.x" "$(mask_report_peer '192.0.2.10')"
+# safe_report_text 会把冒号替换为空格；关键断言是 IPv4 段被打码且端口保留。
+check_equal "IPv4:port peer keeps port but masks address" "192.0.x.x 5201" "$(mask_report_peer '192.0.2.10:5201')"
+
 values="$(recommend_values 1000 500 100 1024 throughput 0.79 0)"
 case "$values" in ERR*) failed=$((failed + 1)); printf 'not ok - BDP recommendation\n' >&2 ;; *) passed=$((passed + 1)); printf 'ok - BDP recommendation\n' ;; esac
 
@@ -296,18 +300,6 @@ else
   passed=$((passed + 1)); printf 'ok - profile probe rejects missing metrics\n'
 fi
 
-# 结果页必须使用实际完成轮数，不能回退后仍显示配置的最大轮数。
-if grep -F 'warn "已完成 $completed_rounds 轮，重传尚未降至目标值。"' "$ROOT_DIR/src/tuning/optimizer.sh" >/dev/null 2>&1; then
-  passed=$((passed + 1)); printf 'ok - result uses actual completed rounds\n'
-else
-  failed=$((failed + 1)); printf 'not ok - result uses configured maximum rounds\n' >&2
-fi
-if grep -F 'ui_note "结果" "已完成基线测试，本轮没有写入参数。"' "$ROOT_DIR/src/tuning/optimizer.sh" >/dev/null 2>&1; then
-  passed=$((passed + 1)); printf 'ok - baseline-only result does not claim retained parameters\n'
-else
-  failed=$((failed + 1)); printf 'not ok - baseline-only result claims retained parameters\n' >&2
-fi
-
 # 脱敏真实 fixtures：覆盖 3.17.1 P1/P4、3.16 成功/失败和截断输出。
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 real_fixture="$ROOT_DIR/tests/fixtures/iperf3/iperf-3.17.1-ipv6-download-p1.json"
@@ -328,6 +320,70 @@ if extract_bps < "$ROOT_DIR/tests/fixtures/iperf3/truncated-output.json.part" >/
 else
   passed=$((passed + 1)); printf 'ok - truncated fixture is rejected\n'
 fi
+
+# auto_tune 端到端行为测试：外部依赖全部用桩替换，验证结果页语义而非源码文案。
+need_root() { return 0; }
+install_runtime_deps() { return 0; }
+detect_os() { OS_FAMILY=linux; OS_ID=linux; OS_NAME=Linux; PKG_MANAGER=none; }
+ensure_tcp_baseline() { return 0; }
+manual_backup_begin() { printf '%s\n' "$TEST_STATE_DIR"; }
+memory_mb() { echo 1024; }
+public_ip() { echo ""; }
+local_lan_ipv4() { echo 192.0.2.10; }
+route_iface_for_host() { echo unsupported; }
+iface_mtu() { echo unknown; }
+probe_pmtu() { echo unsupported; }
+qdisc_stats() { echo "unsupported unsupported"; }
+detect_rtt_ms() { echo 50; }
+post_client_stage() { return 0; }
+post_json() { return 0; }
+write_tuning_profile() { printf '%s\n' "$TEST_STATE_DIR/fake-report.md"; }
+apply_buffers() { printf 'APPLY_BUFFERS_CALLED\n'; }
+rollback_last() { printf 'ROLLBACK_CALLED\n'; }
+restore_manual_backup() { return 0; }
+FAKE_SAMPLE_RETR=0
+measure_iperf_samples() { printf '100000000\t%s\t50000000\t2\n' "$FAKE_SAMPLE_RETR"; }
+
+auto_baseline_output="$(auto_tune '2001:db8::1' 5201 retrans 0 3 1 0 0 100 1024 0.79 0 1 2>&1)" || auto_baseline_output="AUTO_TUNE_FAILED
+$auto_baseline_output"
+case "$auto_baseline_output" in
+  AUTO_TUNE_FAILED*) failed=$((failed + 1)); printf 'not ok - baseline-met auto_tune exits cleanly\n' >&2 ;;
+  *) passed=$((passed + 1)); printf 'ok - baseline-met auto_tune exits cleanly\n' ;;
+esac
+case "$auto_baseline_output" in
+  *APPLY_BUFFERS_CALLED*) failed=$((failed + 1)); printf 'not ok - baseline-met run must not write parameters\n' >&2 ;;
+  *) passed=$((passed + 1)); printf 'ok - baseline-met run does not write parameters\n' ;;
+esac
+case "$auto_baseline_output" in
+  *'共测试 1 轮'*) passed=$((passed + 1)); printf 'ok - result page shows actual completed rounds\n' ;;
+  *) failed=$((failed + 1)); printf 'not ok - result page shows actual completed rounds\n' >&2 ;;
+esac
+case "$auto_baseline_output" in
+  *'本次只完成基线测试'*) passed=$((passed + 1)); printf 'ok - baseline-only result does not claim retained parameters\n' ;;
+  *) failed=$((failed + 1)); printf 'not ok - baseline-only result claims retained parameters\n' >&2 ;;
+esac
+
+FAKE_SAMPLE_RETR=500
+auto_unmet_output="$(auto_tune '2001:db8::1' 5201 retrans 0 1 1 0 0 100 1024 0.79 0 1 2>&1)" || auto_unmet_output="AUTO_TUNE_FAILED
+$auto_unmet_output"
+case "$auto_unmet_output" in
+  *'已完成基线测试，本轮没有写入参数。'*) passed=$((passed + 1)); printf 'ok - exhausted rounds without target keeps baseline-only wording\n' ;;
+  *) failed=$((failed + 1)); printf 'not ok - exhausted rounds without target keeps baseline-only wording\n' >&2 ;;
+esac
+case "$auto_unmet_output" in
+  *'已完成 1 轮，重传尚未降至目标值。'*) passed=$((passed + 1)); printf 'ok - unmet target reports actual completed rounds\n' ;;
+  *) failed=$((failed + 1)); printf 'not ok - unmet target reports actual completed rounds\n' >&2 ;;
+esac
+
+# recommend_values 边界：非法输入必须显式返回 ERR，不得静默给出参数。
+case "$(recommend_values 0 500 100 1024 throughput 0.79 0)" in
+  ERR*) passed=$((passed + 1)); printf 'ok - recommend rejects zero bandwidth\n' ;;
+  *) failed=$((failed + 1)); printf 'not ok - recommend accepted zero bandwidth\n' >&2 ;;
+esac
+case "$(recommend_values 1000 500 0 1024 throughput 0.79 0)" in
+  ERR*) passed=$((passed + 1)); printf 'ok - recommend rejects zero rtt\n' ;;
+  *) failed=$((failed + 1)); printf 'not ok - recommend accepted zero rtt\n' >&2 ;;
+esac
 
 printf '%s passed, %s failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]

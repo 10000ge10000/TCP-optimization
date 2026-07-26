@@ -96,6 +96,41 @@ Describe "iperf3 JSON compatibility" {
   }
 }
 
+Describe "cross-module function references" {
+  It "resolves every custom function referenced by any module" {
+    # Regression guard for the 40-ai.ps1 removal incident: calls into a deleted
+    # module only fail at runtime, so enumerate every CommandAst statically and
+    # require each name to resolve.
+    $moduleNames = @("00-entry.ps1", "10-ui.ps1", "20-runtime.ps1", "30-network.ps1", "50-cli.ps1")
+    $moduleFiles = $moduleNames | ForEach-Object { Join-Path $script:RepoRoot "src\windows\$_" }
+    $defined = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $asts = @{}
+    foreach ($file in $moduleFiles) {
+      $tokens = $null; $parseErrors = $null
+      $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors)
+      $parseErrors | Should -BeNullOrEmpty
+      $asts[$file] = $ast
+      foreach ($fn in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        [void]$defined.Add($fn.Name)
+      }
+    }
+    $externalAllowlist = @("iperf3")
+    $unresolved = [Collections.Generic.List[string]]::new()
+    foreach ($file in $moduleFiles) {
+      $calls = $asts[$file].FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true)
+      foreach ($call in $calls) {
+        $name = $call.GetCommandName()
+        if (-not $name) { continue }
+        if ($defined.Contains($name)) { continue }
+        if ($externalAllowlist -contains $name) { continue }
+        if (Get-Command $name -ErrorAction SilentlyContinue) { continue }
+        $unresolved.Add(("{0} -> {1}" -f (Split-Path -Leaf $file), $name))
+      }
+    }
+    ($unresolved | Sort-Object -Unique) | Should -BeNullOrEmpty
+  }
+}
+
 Describe "iperf3 installer safety" {
   It "pins the reviewed 3.18 archive hash" {
     $entrySource = Get-Content -LiteralPath (Join-Path $script:RepoRoot "src\windows\00-entry.ps1") -Raw

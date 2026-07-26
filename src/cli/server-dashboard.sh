@@ -1,33 +1,14 @@
 # Module: src/cli/server-dashboard.sh
-post_json() {
-  url="$1"
-  token="$2"
-  data="$3"
-  curl -fsS -H "X-TCP-Tune-Token: $token" -H "Content-Type: application/json" -d "$data" "$url"
-}
-
-post_client_stage() {
-  stage="$1"
-  result="$2"
-  detail="${3:-}"
-  [ -n "${TUNE_REPORT_PEER:-}" ] || return 0
-  [ -n "${TUNE_REPORT_TOKEN:-}" ] || return 0
-  now="$(date +%s)"
-  lan_ip="${TUNE_CLIENT_IP:-$(local_lan_ipv4 || true)}"
-  data="{\"role\":\"client-stage\",\"lan_ip\":$(json_string "$lan_ip"),\"stage\":$(json_string "$stage"),\"result\":$(json_string "$result"),\"detail\":$(json_string "$detail"),\"time\":$now}"
-  post_json "$TUNE_REPORT_PEER/report" "$TUNE_REPORT_TOKEN" "$data" >/dev/null 2>&1 || true
-}
-
 get_agent_json() {
   url="$1"
   token="$2"
-  curl -fsS -H "X-TCP-Tune-Token: $token" "$url"
+  curl_with_token "$token" -fsS "$url"
 }
 
 remote_defaults_available() {
   peer="$1"
   token="$2"
-  curl -fsS --max-time 3 -H "X-TCP-Tune-Token: $token" "$peer/defaults" 2>/dev/null | grep -q '"available": true'
+  curl_with_token "$token" -fsS --max-time 3 "$peer/defaults" 2>/dev/null | grep -q '"available": true'
 }
 
 defaults_menu_tag() {
@@ -169,7 +150,7 @@ render_server_dashboard() {
 render_server_activity() {
   token="$1"
   dashboard_file="$STATE_DIR/server-dashboard-$AGENT_PORT.json"
-  if ! curl -fsS -H "X-TCP-Tune-Token: $token" "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
+  if ! curl_with_token "$token" -fsS "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
     printf "%s会话状态%s\n" "$COLOR_BOLD$COLOR_CYAN" "$COLOR_RESET"
     print_rule
     echo "  Agent 状态暂时不可读。"
@@ -290,7 +271,7 @@ server_compact_status_line() {
   remaining="${2:-0}"
   ttl_text="$((remaining / 60))m $((remaining % 60))s"
   dashboard_file="$STATE_DIR/server-compact-$AGENT_PORT.json"
-  if ! curl -fsS -H "X-TCP-Tune-Token: $token" "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
+  if ! curl_with_token "$token" -fsS "http://127.0.0.1:$AGENT_PORT/state" -o "$dashboard_file" 2>/dev/null; then
     printf "刷新 %s | 剩余 %s | Agent 状态暂不可读" "$(date '+%H:%M:%S')" "$ttl_text"
     return 0
   fi
@@ -433,6 +414,7 @@ print_client_commands() {
   esac
   ui_section "客户端连接命令"
   ui_note "令牌" "交互终端显示完整 token；非交互输出会隐藏 token。"
+  ui_note "安全" "多用户客户端主机上建议先 export TCP_TUNE_TOKEN=<令牌> 再省略 --token，避免 token 进入 shell history。"
   printf "%sOpenWrt / Linux / macOS%s\n" "$COLOR_CYAN" "$COLOR_RESET"
   cat <<EOF
   curl -fsSL $RAW_BASE_URL/tcp-tune.sh | \\

@@ -50,16 +50,15 @@ need_root() {
 
 ensure_state_dir() {
   need_root
-  umask 077
-  mkdir -p "$STATE_DIR/backups" "$STATE_DIR/sessions" "$STATE_DIR/rolled-back"
+  # 子 shell 内收紧 umask，避免修改整个进程的全局 umask。
+  (umask 077; mkdir -p "$STATE_DIR/backups" "$STATE_DIR/sessions" "$STATE_DIR/rolled-back") || return 1
   chmod 700 "$STATE_DIR" "$STATE_DIR/backups" "$STATE_DIR/sessions" "$STATE_DIR/rolled-back" 2>/dev/null || true
 }
 
 secure_temp_dir() {
   prefix="${1:-tcp-tune}"
   if have_cmd mktemp; then
-    umask 077
-    mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX"
+    (umask 077; mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
     return
   fi
   return 1
@@ -72,8 +71,7 @@ atomic_copy_file() {
   [ "$target_dir" = "$target_file" ] && target_dir=.
   mkdir -p "$target_dir"
   tmp_file="$target_dir/.tcp-tune.$$.tmp"
-  umask 077
-  cp "$source_file" "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+  (umask 077; cp "$source_file" "$tmp_file") || { rm -f "$tmp_file"; return 1; }
   chmod 600 "$tmp_file" 2>/dev/null || true
   mv -f "$tmp_file" "$target_file"
 }
@@ -85,8 +83,7 @@ atomic_write_line() {
   [ "$target_dir" = "$target_file" ] && target_dir=.
   mkdir -p "$target_dir"
   tmp_file="$target_dir/.tcp-tune.$$.tmp"
-  umask 077
-  printf '%s\n' "$value" > "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+  (umask 077; printf '%s\n' "$value" > "$tmp_file") || { rm -f "$tmp_file"; return 1; }
   chmod 600 "$tmp_file" 2>/dev/null || true
   mv -f "$tmp_file" "$target_file"
 }
@@ -198,6 +195,20 @@ mask_report_peer() {
       inner="$(printf '%s' "$value" | sed 's#^[^[]*\[\([^]]*\)\].*#\1#')"
       first="${inner%%:*}"
       last="${inner##*:}"
+      printf '%s\n' "$(safe_report_text "$first:...:$last")"
+      return 0
+      ;;
+    *.*.*.*:*)
+      # IPv4:端口——IPv4 段仍需打码，不能因带端口而整段进入报告。
+      host_part="${value%%:*}"
+      port_part="${value##*:}"
+      if [ "${value%:*}" = "$host_part" ]; then
+        masked_host="$(mask_report_peer "$host_part")"
+        printf '%s\n' "$(safe_report_text "$masked_host:$port_part")"
+        return 0
+      fi
+      first="${value%%:*}"
+      last="${value##*:}"
       printf '%s\n' "$(safe_report_text "$first:...:$last")"
       return 0
       ;;
