@@ -321,6 +321,18 @@ else
   passed=$((passed + 1)); printf 'ok - truncated fixture is rejected\n'
 fi
 
+# /defaults 探测必须兼容 Agent 的紧凑 JSON 输出（"available":true 无空格）。
+curl_with_token() { printf '{"ok":true,"available":true,"result":{}}'; }
+check_true "remote defaults probe accepts compact JSON" remote_defaults_available http://peer.invalid token
+curl_with_token() { printf '{"ok": true, "available": true}'; }
+check_true "remote defaults probe accepts spaced JSON" remote_defaults_available http://peer.invalid token
+curl_with_token() { printf '{"ok":true,"available":false}'; }
+if remote_defaults_available http://peer.invalid token; then
+  failed=$((failed + 1)); printf 'not ok - remote defaults probe rejects unavailable\n' >&2
+else
+  passed=$((passed + 1)); printf 'ok - remote defaults probe rejects unavailable\n'
+fi
+
 # auto_tune 端到端行为测试：外部依赖全部用桩替换，验证结果页语义而非源码文案。
 need_root() { return 0; }
 install_runtime_deps() { return 0; }

@@ -8,7 +8,8 @@ get_agent_json() {
 remote_defaults_available() {
   peer="$1"
   token="$2"
-  curl_with_token "$token" -fsS --max-time 3 "$peer/defaults" 2>/dev/null | grep -q '"available": true'
+  # Agent 输出紧凑 JSON（"available":true 无空格），匹配必须容忍两种格式。
+  curl_with_token "$token" -fsS --max-time 3 "$peer/defaults" 2>/dev/null | grep -Eq '"available"[[:space:]]*:[[:space:]]*true'
 }
 
 defaults_menu_tag() {

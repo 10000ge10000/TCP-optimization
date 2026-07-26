@@ -171,3 +171,24 @@ PowerShell 侧在 Windows PowerShell 5.1 与 PowerShell 7 中运行 Parser 与 P
 - macOS 实机与 PowerShell 7 实机：环境未提供。
 - 24 小时长稳观察与更多运营商/地区/时段的链路样本。
 - 本链路未证明稳定性能提升；v0.2.0 报告的准确结论（安全判断与回滚闭环有效，性能提升未证明）仍然成立。
+
+## v0.3.0 移除 AI 后双端复验（2026-07-27）
+
+环境：OpenWrt x86_64（6.6.127，iperf 3.17.1，无 python3/tc，走 jsonfilter 解析路径）↔ 东京 VPS（Debian 13，内核 6.12.94，iperf 3.18，442MiB 内存），IPv6 直连，RTT 约 56ms；VPS 上用户已有 5202 iperf3 服务全程未受影响。真实地址与 token 未写入仓库。
+
+| 能力 | 实测结果 |
+|---|---|
+| 双端会话 | listen 启动 readiness 通过；无 token 403 / 带 token 200；非交互输出自动隐藏 token |
+| status --json / doctor | JSON envelope 正常；doctor 正确报告 tc/python3 缺失并给出 opkg 建议 |
+| 高级链路诊断 | P1 上传 64.7 Mbps / 重传 14,261；P1 下载 1.00 Gbps / 0；P4 双向完成；qdisc/PMTU 如实报 `unsupported` |
+| 稳定自动优化（upload/retrans 2 轮） | 白名单写入 → 次轮复测改善仅 1%（未达 15% 阈值）→ 自动回滚并如实报告"重传尚未达到目标" |
+| Linux 完整写入事务（vps-adapt） | 多值键 `tcp_rmem/tcp_wmem` 在真实内核制表符回读下写入验证成功（修复前该事务必然误回滚）；rollback 后 sysctl 值与托管文件 SHA256 逐字节复原 |
+| 预制参数 | OpenWrt 端正确拒绝大缓冲预设并指引 local-minimal；local-minimal dry-run 输出正常 |
+| 恢复默认值 | 菜单 9：本机+服务端快照均识别并恢复；服务端事件记录"恢复默认值" |
+| Windows 客户端 | IPv6 配对成功，下载 1.01 Gbps / 0 重传，全程未写 Windows TCP 栈 |
+| 配对边界 | 第二客户端（Windows）向已配对会话上报被 403 `peer_mismatch` 拒绝 |
+| 清理 | 菜单 7 与 stop-agent 两条路径均验证：39188/5201 停止、token/manifest/锁清理、用户 5202 存活；两端 sysctl 终态与测试前完全一致 |
+
+本次实测发现并修复一个缺陷：`remote_defaults_available` 用带空格的 `"available": true` 匹配 Agent 的紧凑 JSON 输出，导致"服务端快照"恒显示"未知或不可用"（恢复请求本身不受影响）。已改为容忍两种格式并补回归测试。
+
+结论不变：安全判断、事务回滚、双端清理与平台边界在真实链路上全部有效；本链路上传方向受运营商侧限制（高重传、约 60 Mbps），确定性优化如实拒绝保留无改善参数，未夸大收益。
