@@ -30,46 +30,59 @@ class AgentIntegrationTests(unittest.TestCase):
         # The downloaded single-file script is commonly invoked through `sh`
         # and may not carry its executable bit. The Agent must support that.
         fake.chmod(0o600)
+        self.script = fake
+        self.extra_procs = []
+        self.proc = self.start_agent(self.port)
+
+    def start_agent(self, port, extra_env=None):
         env = os.environ.copy()
         env.update({
             "TCP_TUNE_TOKEN": self.token,
-            "TCP_TUNE_SCRIPT": str(fake),
+            "TCP_TUNE_SCRIPT": str(self.script),
             "TCP_TUNE_STATE_DIR": self.temp.name,
             "TCP_TUNE_SESSION_ID": "test-session",
-            "TCP_TUNE_AGENT_PORT": str(self.port),
+            "TCP_TUNE_AGENT_PORT": str(port),
             "TCP_TUNE_IPERF_PORT": "5201",
             "TCP_TUNE_SESSION_TTL": "3",
             "TCP_TUNE_AGENT_BODY_LIMIT": "32768",
             "TCP_TUNE_AGENT_MAX_CONCURRENCY": "2",
             "TCP_TUNE_ALLOW_QUERY_TOKEN": "0",
         })
-        self.proc = subprocess.Popen([os.environ.get("PYTHON", "python3"), str(AGENT)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        env.update(extra_env or {})
+        proc = subprocess.Popen([os.environ.get("PYTHON", "python3"), str(AGENT)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if port != self.port:
+            self.extra_procs.append(proc)
         deadline = time.time() + 5
         while time.time() < deadline:
             try:
-                status, _ = self.request("GET", "/state")
+                status, _ = self.request("GET", "/state", port=port)
                 if status == 200:
-                    return
+                    return proc
             except OSError:
                 time.sleep(0.05)
-        self.fail("agent did not start")
+        self.fail(f"agent on port {port} did not start")
+
+    def stop_proc(self, proc):
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        if proc.stdout:
+            proc.stdout.close()
+        if proc.stderr:
+            proc.stderr.close()
 
     def tearDown(self):
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=2)
-        if self.proc.stdout:
-            self.proc.stdout.close()
-        if self.proc.stderr:
-            self.proc.stderr.close()
+        for proc in [self.proc, *self.extra_procs]:
+            self.stop_proc(proc)
         self.temp.cleanup()
 
-    def request(self, method, path, body=None, token=True):
-        headers = {"Host": f"127.0.0.1:{self.port}"}
+    def request(self, method, path, body=None, token=True, port=None):
+        port = port or self.port
+        headers = {"Host": f"127.0.0.1:{port}"}
         if token:
             headers["X-TCP-Tune-Token"] = self.token
         data = None
@@ -77,7 +90,7 @@ class AgentIntegrationTests(unittest.TestCase):
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
             headers["Content-Length"] = str(len(data))
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
         connection.request(method, path, body=data, headers=headers)
         response = connection.getresponse()
         payload = response.read()
@@ -193,11 +206,29 @@ class AgentIntegrationTests(unittest.TestCase):
 
     def test_test_target_is_pinned_to_validated_address(self):
         self.assertEqual(self.request("POST", "/report", {"role": "test", "lan_ip": "127.0.0.1"})[0], 200)
+        resolved = {item[4][0] for item in socket.getaddrinfo("localhost", None, type=socket.SOCK_STREAM)}
         status, payload = self.request("POST", "/test", {"host": "localhost", "port": 5201, "seconds": 1, "direction": "download"})
+        if resolved - {"127.0.0.1"}:
+            # localhost 还解析到 ::1 等地址（GitHub runner 即如此）：不在许可集内必须失败关闭。
+            self.assertEqual(status, 403)
+            self.assertEqual(payload["error_code"], "test_target_denied")
+            return
+        # localhost 只解析到已配对地址时必须放行，且传给 iperf3 的是校验出的 IP 而非主机名。
         self.assertEqual(status, 200)
-        # 传给 iperf3 的必须是校验时解析出的具体 IP，而非可被重绑定的主机名。
         forwarded = json.loads(payload["result"]["stdout"])["target"]
         self.assertEqual(forwarded, "127.0.0.1")
+
+    def test_allowlisted_hostname_is_forwarded_as_resolved_ip(self):
+        # 显式 allowlist 覆盖 localhost 的全部解析地址，因此单栈/双栈环境都会放行；
+        # 断言重点是转发给 iperf3 的必须是 IP 字面量，而不是可被重绑定的主机名。
+        port = free_port()
+        self.start_agent(port, {"TCP_TUNE_AGENT_TEST_ALLOWLIST": "localhost"})
+        self.assertEqual(self.request("POST", "/report", {"role": "test", "lan_ip": "127.0.0.1"}, port=port)[0], 200)
+        status, payload = self.request("POST", "/test", {"host": "localhost", "port": 5201, "seconds": 1, "direction": "download"}, port=port)
+        self.assertEqual(status, 200)
+        forwarded = json.loads(payload["result"]["stdout"])["target"]
+        self.assertNotEqual(forwarded, "localhost")
+        self.assertIn(forwarded, {item[4][0] for item in socket.getaddrinfo("localhost", None, type=socket.SOCK_STREAM)})
 
     def test_oversized_body_is_rejected_before_parsing(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
